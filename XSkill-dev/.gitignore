@@ -23,9 +23,14 @@ env/
 *.swp
 *.swo
 
+# Agent-only local guidance
+AGENT.md
+AGENTS.md
+
 # Large raw benchmark sources kept locally only
 MM-BrowseComp-main/
 TIR-Bench-main/
+benchmark/
 benchmark/*/raw/
 benchmark/_mixed_protocol/
 

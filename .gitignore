@@ -35,11 +35,18 @@ conda_env/
 *.swp
 *.swo
 
+# Agent-only local guidance
+AGENT.md
+AGENTS.md
+**/AGENT.md
+**/AGENTS.md
+
 # Large raw benchmark sources kept locally only
 MM-BrowseComp-main/
 TIR-Bench-main/
 XSkill-dev/MM-BrowseComp-main/
 XSkill-dev/TIR-Bench-main/
+XSkill-dev/benchmark/
 XSkill-dev/benchmark/*/raw/
 XSkill-dev/benchmark/_mixed_protocol/
 
