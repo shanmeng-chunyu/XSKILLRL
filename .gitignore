@@ -2,19 +2,31 @@
 logs/
 output/
 memory_bank/
+**/logs/
+**/output/
+**/memory_bank/
+**/checkpoints/
+wandb/
+**/wandb/
 
 # Python cache / build artifacts
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 .Python
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
 
 # Virtual environments
 .venv/
 venv/
 env/
+conda_env/
 
 # OS / editor files
 .DS_Store
@@ -26,14 +38,17 @@ env/
 # Large raw benchmark sources kept locally only
 MM-BrowseComp-main/
 TIR-Bench-main/
-benchmark/*/raw/
-benchmark/_mixed_protocol/
+XSkill-dev/MM-BrowseComp-main/
+XSkill-dev/TIR-Bench-main/
+XSkill-dev/benchmark/*/raw/
+XSkill-dev/benchmark/_mixed_protocol/
 
 # Generated benchmark assets
-benchmark/MM-BrowseComp/images/
-benchmark/TIR-Bench/data/
+XSkill-dev/benchmark/MM-BrowseComp/images/
+XSkill-dev/benchmark/TIR-Bench/data/
 *.parquet
 *.part
 
 # Local reports and temporary manifests
 downloaded_benchmarks_manifest.json
+XSkill-dev/downloaded_benchmarks_manifest.json

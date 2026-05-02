@@ -1,0 +1,39 @@
+# Runtime outputs
+logs/
+output/
+memory_bank/
+
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS / editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Large raw benchmark sources kept locally only
+MM-BrowseComp-main/
+TIR-Bench-main/
+benchmark/*/raw/
+benchmark/_mixed_protocol/
+
+# Generated benchmark assets
+benchmark/MM-BrowseComp/images/
+benchmark/TIR-Bench/data/
+*.parquet
+*.part
+
+# Local reports and temporary manifests
+downloaded_benchmarks_manifest.json
