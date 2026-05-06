@@ -15,12 +15,16 @@ zoom:
 
 # WebSearch configuration
 web_search:
+  # Supported: bocha, serper. Leave empty to use SEARCH_API_PROVIDER env.
+  provider: ""
   max_results: 10
   timeout: 10
 
 
 # Visit configuration
 visit:
+  # Supported: local, auto, jina. local uses requests + trafilatura only.
+  backend: "local"
   max_content_length: 150000
   timeout: 120
   api_key: ""

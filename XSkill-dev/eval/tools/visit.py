@@ -1,7 +1,9 @@
 """
-Visit tool - visit webpage and extract content
-Use Trafilatura to extract webpage content (open source solution)
-Fail to fallback to Jina API
+Visit tool - visit webpage and extract content.
+
+Default behavior is fully local/open-source extraction with requests and
+trafilatura. Jina Reader is optional and only used when VISIT_BACKEND=auto or
+VISIT_BACKEND=jina and JINA_API_KEY is configured.
 """
 
 import os
@@ -40,6 +42,18 @@ class Visit(BaseTool):
     
     def __init__(self, config=None):
         super().__init__(config)
+        config = config or {}
+        self.visit_backend = (
+            config.get("backend")
+            or os.environ.get("VISIT_BACKEND")
+            or "local"
+        ).lower()
+        if self.visit_backend not in ("local", "auto", "jina"):
+            raise ValueError(f"Unsupported VISIT_BACKEND: {self.visit_backend}")
+        if self.visit_backend == "local" and trafilatura is None:
+            raise ImportError("trafilatura is required when VISIT_BACKEND=local")
+        if self.visit_backend == "jina" and not JINA_AVAILABLE:
+            raise ImportError("JINA_API_KEY is required when VISIT_BACKEND=jina")
         if trafilatura is None and not JINA_AVAILABLE:
             raise ImportError("Either trafilatura or JINA_API_KEY is required for Visit tool")
         
@@ -90,77 +104,22 @@ class Visit(BaseTool):
             print(f"[Visit] Fetching URL: {url}")
             print(f"[Visit] Goal: {goal}")
             
-            downloaded = None
-            # Prioritize using Jina for extraction, then fallback to requests + trafilatura
             content = None
-            if JINA_AVAILABLE:
+
+            if self.visit_backend == "jina":
                 print("[Visit] Trying Jina API first...")
+                content = self._jina_readpage(url)
+                if content and content.startswith("[visit] Failed to read page."):
+                    content = None
+            elif self.visit_backend in ("local", "auto"):
+                content = self._readpage_local(url)
+
+            if not content and self.visit_backend == "auto" and JINA_AVAILABLE:
+                print("[Visit] Local extraction failed, trying Jina API fallback...")
                 downloaded = self._jina_readpage(url)
                 if downloaded and not downloaded.startswith("[visit] Failed to read page."):
                     content = downloaded
                     print(f"[Visit] Jina API extraction successful: {len(content)} characters")
-            
-            # If Jina is not available or fails, fallback to requests + trafilatura
-            if not content:
-                # Use Trafilatura to extract webpage content
-                # Improvement 1: Add custom headers (pretend to be a browser)
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1'
-                }
-                
-                # Use requests with headers to get content
-                try:
-                    response = requests.get(url, headers=headers, timeout=self.timeout)
-                    response.raise_for_status()
-                    downloaded = response.text
-                except Exception as e:
-                    print(f"[Visit] Requests failed: {e}, trying trafilatura.fetch_url as fallback")
-                    if trafilatura is not None:
-                        try:
-                            downloaded = trafilatura.fetch_url(url)
-                        except Exception as e2:
-                            print(f"[Visit] Trafilatura.fetch_url also failed: {e2}")
-                
-                # Improvement 2: Extract main content, enable favor_recall (improve recall)
-                if downloaded and trafilatura is not None:
-                    content = trafilatura.extract(
-                        downloaded,
-                        include_comments=False,
-                        output_format='markdown',
-                        include_links=True,
-                        include_tables=True,
-                        favor_recall=True,  # Improve recall, reduce missed extraction
-                        include_formatting=True,
-                        deduplicate=True
-                    )
-                    
-                    if not content:
-                        # Try plain text format + favor_recall
-                        print("[Visit] Markdown extraction failed, trying plain text with favor_recall")
-                        content = trafilatura.extract(
-                            downloaded,
-                            include_comments=False,
-                            output_format='txt',
-                            favor_recall=True,
-                            deduplicate=True
-                        )
-                elif downloaded and trafilatura is None:
-                    print("[Visit] Trafilatura not available, skipped local extraction")
-                
-                # If requests+trafilatura still fails, try Jina last (prevent Jina from failing initially)
-                if not content and JINA_AVAILABLE:
-                    print(f"[Visit] Fallback to Jina API after other methods failed...")
-                    content = self._jina_readpage(url)
-                    if content and not content.startswith("[visit] Failed to read page."):
-                        print(f"[Visit] Jina API extraction successful: {len(content)} characters")
-                    else:
-                        content = None
             
             # All methods failed
             if not content:
@@ -188,6 +147,61 @@ class Visit(BaseTool):
             error_msg = f"Error visiting {url}: {str(e)}"
             print(f"[Visit] {error_msg}")
             return error_msg
+
+    def _readpage_local(self, url: str) -> str:
+        """Read and extract webpage content locally with requests + trafilatura."""
+
+        downloaded = None
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
+
+        try:
+            response = requests.get(url, headers=headers, timeout=self.timeout)
+            response.raise_for_status()
+            downloaded = response.text
+        except Exception as e:
+            print(f"[Visit] Requests failed: {e}, trying trafilatura.fetch_url as fallback")
+            if trafilatura is not None:
+                try:
+                    downloaded = trafilatura.fetch_url(url)
+                except Exception as e2:
+                    print(f"[Visit] Trafilatura.fetch_url also failed: {e2}")
+
+        if downloaded and trafilatura is not None:
+            content = trafilatura.extract(
+                downloaded,
+                include_comments=False,
+                output_format='markdown',
+                include_links=True,
+                include_tables=True,
+                favor_recall=True,
+                include_formatting=True,
+                deduplicate=True
+            )
+
+            if not content:
+                print("[Visit] Markdown extraction failed, trying plain text with favor_recall")
+                content = trafilatura.extract(
+                    downloaded,
+                    include_comments=False,
+                    output_format='txt',
+                    favor_recall=True,
+                    deduplicate=True
+                )
+            return content
+
+        if downloaded and trafilatura is None:
+            print("[Visit] Trafilatura not available, returning raw HTML text")
+            return downloaded
+
+        return None
     
     def _summarize_with_api(self, content, goal, url):
         """

@@ -69,6 +69,7 @@ class ExperienceRetriever:
     Retrieves relevant experiences based on query embedding similarity.
     
     Supports:
+    - Local open-source embeddings via sentence-transformers
     - OpenAI-compatible embedding API
     - In-memory embedding storage with optional disk caching
     - Cosine similarity-based retrieval
@@ -91,7 +92,8 @@ class ExperienceRetriever:
         
         Args:
             experiences: Dictionary mapping experience IDs to experience text
-            embedding_model: Embedding model name (default: "text-embedding-3-small")
+            embedding_model: Embedding model name. For local embeddings, use a
+                sentence-transformers compatible model such as BAAI/bge-m3.
             embedding_api_key: API key for embedding service (defaults to EXPERIENCE_EMBEDDING_API_KEY or OPENAI_API_KEY)
             embedding_endpoint: API endpoint for embedding service (defaults to EXPERIENCE_EMBEDDING_ENDPOINT or OPENAI_API_BASE)
             cache_dir: Directory to cache embeddings (defaults to experience/embeddings/{library_name}/)
@@ -115,19 +117,39 @@ class ExperienceRetriever:
             or os.environ.get("EXPERIENCE_EMBEDDING_API_KEY")
             or os.environ.get("OPENAI_API_KEY")
         )
-        
-        # Normalize endpoint
+
         self.embedding_endpoint = (
             embedding_endpoint
             or os.environ.get("EXPERIENCE_EMBEDDING_ENDPOINT")
             or os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
         )
-        
-        # Ensure endpoint format is correct
-        if not self.embedding_endpoint.endswith("/v1"):
-            self.embedding_endpoint = self.embedding_endpoint.rstrip("/") + "/v1"
-        
-        if not self.embedding_api_key:
+
+        self.embedding_backend = (
+            os.environ.get("EXPERIENCE_EMBEDDING_BACKEND")
+            or ("api" if self.embedding_api_key else "local")
+        ).lower()
+        if self.embedding_backend not in ("api", "local"):
+            raise ValueError(
+                "EXPERIENCE_EMBEDDING_BACKEND must be either 'api' or 'local'"
+            )
+
+        self.local_embedding_device = os.environ.get("EXPERIENCE_EMBEDDING_DEVICE")
+        self._local_embedding_model = None
+
+        if self.embedding_backend == "local":
+            # Keep the script usable when users switch from API embeddings without
+            # remembering to replace the OpenAI model name.
+            if self.embedding_model in ("text-embedding-3-small", "text-embedding-3-large"):
+                self.embedding_model = os.environ.get(
+                    "EXPERIENCE_LOCAL_EMBEDDING_MODEL",
+                    "BAAI/bge-m3",
+                )
+        else:
+            # Ensure endpoint format is correct for OpenAI-compatible embeddings.
+            if self.embedding_endpoint and not self.embedding_endpoint.endswith("/v1"):
+                self.embedding_endpoint = self.embedding_endpoint.rstrip("/") + "/v1"
+
+        if self.embedding_backend == "api" and not self.embedding_api_key:
             raise ValueError(
                 "Embedding API key is required. Set EXPERIENCE_EMBEDDING_API_KEY "
                 "or OPENAI_API_KEY environment variable, or pass embedding_api_key parameter."
@@ -236,6 +258,44 @@ class ExperienceRetriever:
                 return None
         return None
 
+    def _get_local_embedding_model(self):
+        """Lazy-load a local sentence-transformers embedding model."""
+
+        if self._local_embedding_model is not None:
+            return self._local_embedding_model
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError as exc:
+            raise RuntimeError(
+                "sentence-transformers is required for local embeddings. "
+                "Install XSkill-dev/requirements.txt or set EXPERIENCE_EMBEDDING_BACKEND=api."
+            ) from exc
+
+        kwargs = {}
+        if self.local_embedding_device:
+            kwargs["device"] = self.local_embedding_device
+        print(
+            f"Loading local embedding model: {self.embedding_model}"
+            + (f" on {self.local_embedding_device}" if self.local_embedding_device else "")
+        )
+        self._local_embedding_model = SentenceTransformer(self.embedding_model, **kwargs)
+        return self._local_embedding_model
+
+    def _generate_embeddings_local(self, texts: List[str]) -> List[Optional[np.ndarray]]:
+        """Generate normalized embeddings locally with sentence-transformers."""
+
+        if not texts:
+            return []
+        model = self._get_local_embedding_model()
+        embeddings = model.encode(
+            texts,
+            batch_size=BATCH_SIZE,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        return [np.asarray(embedding, dtype=np.float32) for embedding in embeddings]
+
     def _generate_embedding(self, text: str, max_retries: int = MAX_RETRIES) -> Optional[np.ndarray]:
         """
         Generate embedding for a single text using API.
@@ -247,6 +307,10 @@ class ExperienceRetriever:
         Returns:
             Embedding vector as numpy array, or None if failed
         """
+        if self.embedding_backend == "local":
+            embeddings = self._generate_embeddings_local([text])
+            return embeddings[0] if embeddings else None
+
         payload = {"model": self.embedding_model, "input": text}
         data = self._post_embedding_request(payload, max_retries=max_retries, is_batch=False)
         if not data:
@@ -308,6 +372,9 @@ class ExperienceRetriever:
         """
         if not texts:
             return []
+        if self.embedding_backend == "local":
+            return self._generate_embeddings_local(texts)
+
         payload = {"model": self.embedding_model, "input": texts}
         data = self._post_embedding_request(payload, max_retries=max_retries, is_batch=True)
         if not data:
@@ -346,6 +413,9 @@ class ExperienceRetriever:
             
             if metadata.get("model") != self.embedding_model:
                 logger.info("Embedding model changed, cache invalid, regenerating...")
+                return False
+            if metadata.get("backend", "api") != self.embedding_backend:
+                logger.info("Embedding backend changed, cache invalid, regenerating...")
                 return False
             
             # Load embeddings
@@ -388,6 +458,7 @@ class ExperienceRetriever:
             metadata = {
                 "library_hash": self._compute_library_hash(),
                 "model": self.embedding_model,
+                "backend": self.embedding_backend,
                 "experience_ids": list(self._experience_embeddings.keys()),
                 "dimension": (
                     len(list(self._experience_embeddings.values())[0])
@@ -416,7 +487,10 @@ class ExperienceRetriever:
         
         # Generate embeddings for all experiences
         total_exps = len(self.experiences)
-        print(f"\nGenerating embeddings for {total_exps} experiences using model: {self.embedding_model}")
+        print(
+            f"\nGenerating embeddings for {total_exps} experiences using "
+            f"{self.embedding_backend} model: {self.embedding_model}"
+        )
         print("This may take a while for the first time...")
         
         exp_ids = list(self.experiences.keys())
@@ -614,6 +688,7 @@ class ExperienceRetriever:
             "embedded_count": len(self._experience_embeddings),
             "missing_count": len(self.experiences) - len(self._experience_embeddings),
             "embedding_model": self.embedding_model,
+            "embedding_backend": self.embedding_backend,
             "cache_enabled": self.enable_cache,
             "cache_path": self._cache_embeddings_path,
         }

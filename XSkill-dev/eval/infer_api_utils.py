@@ -94,6 +94,7 @@ def initialize_experience_retriever(args):
                     print(f"Experience Retriever initialized:")
                     print(f"  - Total experiences: {stats['total_experiences']}")
                     print(f"  - Embedded count: {stats['embedded_count']}")
+                    print(f"  - Embedding backend: {stats.get('embedding_backend', 'api')}")
                     print(f"  - Embedding model: {stats['embedding_model']}")
                     print(f"  - Cache enabled: {stats['cache_enabled']}")
                     if stats['cache_path']:

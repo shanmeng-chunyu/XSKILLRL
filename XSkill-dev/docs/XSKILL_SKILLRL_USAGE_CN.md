@@ -107,3 +107,13 @@ python scripts/build_skillrl_grpo_command.py `
 ```
 
 更完整说明见 `docs/SKILLRL_GRPO_INTEGRATION_CN.md`。
+
+## 6. 搜索、网页访问和 embedding 后端
+
+当前工具后端支持：
+
+- `web_search`: 可用博查 API，配置 `SEARCH_API_PROVIDER=bocha` 和 `BOCHA_API_KEY`。
+- `visit`: 默认本地 `requests + trafilatura`，配置 `VISIT_BACKEND=local`。
+- experience embedding: 默认本地开源 `sentence-transformers`，配置 `EXPERIENCE_EMBEDDING_BACKEND=local`。
+
+详细配置见 `docs/TOOL_AND_EMBEDDING_BACKENDS_CN.md`。

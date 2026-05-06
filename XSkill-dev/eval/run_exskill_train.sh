@@ -33,17 +33,30 @@ export EXPERIENCE_API_KEY=$API_KEY_2
 export EXPERIENCE_END_POINT=""
 
 # Optional: Fallback API for experience generation
-export EXPERIENCE_EMBEDDING_MODEL="text-embedding-3-small"
 export EXPERIENCE_API_KEY_2=$API_KEY_1
 export EXPERIENCE_END_POINT_2=""
 
-export EXPERIENCE_EMBEDDING_API_KEY=$API_KEY_2
-export EXPERIENCE_EMBEDDING_ENDPOINT="" 
+# Local open-source embedding by default. Set EXPERIENCE_EMBEDDING_BACKEND=api
+# and fill API key/endpoint if you prefer an OpenAI-compatible embedding API.
+export EXPERIENCE_EMBEDDING_BACKEND="local"
+export EXPERIENCE_EMBEDDING_MODEL="BAAI/bge-m3"
+export EXPERIENCE_EMBEDDING_DEVICE="cuda"
+export EXPERIENCE_EMBEDDING_API_KEY=""
+export EXPERIENCE_EMBEDDING_ENDPOINT=""
 
 # ============================================================================
 # Function Calling Configuration
 # ============================================================================
+# Web search provider. Bocha replaces the old Serper/SERPAPI web_search path.
+export SEARCH_API_PROVIDER="bocha"
+export BOCHA_API_KEY=""
+
+# Only needed if using image_search or SEARCH_API_PROVIDER=serper.
 export SERPAPI_KEY=""
+
+# Visit uses local requests + trafilatura by default. Set VISIT_BACKEND=auto
+# and JINA_API_KEY to enable Jina Reader fallback.
+export VISIT_BACKEND="local"
 export JINA_API_KEY=""
 
 export ENABLE_FUNCTION_CALLING="true"

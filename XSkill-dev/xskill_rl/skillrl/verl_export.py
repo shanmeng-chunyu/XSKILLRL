@@ -18,6 +18,24 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return "\n".join(_as_text(item) for item in value if item is not None)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
+def _as_text_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    return [str(value)]
+
+
 def make_skill_augmented_messages(
     problem: str,
     *,
@@ -45,7 +63,7 @@ def sample_to_verl_record(
     top_k: int = 6,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
 ) -> Dict[str, Any]:
-    problem = sample.get("problem") or sample.get("question") or ""
+    problem = _as_text(sample.get("problem") or sample.get("question") or "")
     skill_text = ""
     retrieval_payload: Dict[str, Any] = {}
     if memory is not None:
@@ -55,45 +73,48 @@ def sample_to_verl_record(
             metadata=sample,
         )
         skill_text = memory.format_for_prompt(retrieval_payload)
+    doc_id = _as_text(sample.get("doc_id") or sample.get("question_id") or index)
+    solution = _as_text(sample.get("solution", ""))
+    images = _as_text_list(sample.get("images", []))
+    sample_json = json.dumps(sample, ensure_ascii=False)
 
-    benchmark_name = sample.get("benchmark_name") or "xskill"
+    benchmark_name = _as_text(sample.get("benchmark_name") or "xskill")
     extra_info = {
         "index": index,
-        "doc_id": sample.get("doc_id") or sample.get("question_id") or str(index),
+        "doc_id": doc_id,
         "benchmark_name": benchmark_name,
-        "solution": sample.get("solution", ""),
-        "answer": sample.get("solution", ""),
-        "sample": sample,
+        "solution": solution,
+        "answer": solution,
+        "sample_json": sample_json,
         "skill_retrieval": {
             "enabled": memory is not None,
-            "task_type": retrieval_payload.get("task_type"),
-            "retrieval_mode": retrieval_payload.get("retrieval_mode"),
-            "top_k": top_k,
+            "task_type": _as_text(retrieval_payload.get("task_type")),
+            "retrieval_mode": _as_text(retrieval_payload.get("retrieval_mode")),
+            "top_k": int(top_k),
         },
     }
 
     env_kwargs = {
-        "doc_id": extra_info["doc_id"],
+        "doc_id": doc_id,
         "benchmark_name": benchmark_name,
         "problem": problem,
-        "images": list(sample.get("images", [])),
-        "solution": sample.get("solution", ""),
+        "images": images,
+        "solution": solution,
         "prompt": make_skill_augmented_messages(
             problem,
             skill_text=skill_text,
             system_prompt=system_prompt,
         ),
-        "sample": sample,
     }
 
     return {
         "data_source": benchmark_name,
         "prompt": env_kwargs["prompt"],
-        "images": list(sample.get("images", [])),
+        "images": images,
         "env_kwargs": env_kwargs,
         "reward_model": {
             "style": "xskill_rule_or_judge",
-            "ground_truth": sample.get("solution", ""),
+            "ground_truth": solution,
         },
         "extra_info": extra_info,
     }

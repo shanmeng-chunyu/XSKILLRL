@@ -1,5 +1,9 @@
 """
-WebSearch tool - use Serper.dev Google Search API for web search
+WebSearch tool with pluggable providers.
+
+Supported providers:
+- bocha: Bocha Web Search API, configured by BOCHA_API_KEY.
+- serper: Serper.dev Google Search API, configured by SERPAPI_KEY.
 """
 
 import os
@@ -31,22 +35,39 @@ class WebSearch(BaseTool):
     
     def __init__(self, config=None):
         super().__init__(config)
-        
-        # Get API key from environment variable
-        self.api_key = os.getenv("SERPAPI_KEY")
-        
-        # Get from config (if provided)
-        if config and 'api_key' in config and config['api_key']:
-            self.api_key = config['api_key']
-        
-        if not self.api_key:
-            raise ValueError(
-                "Serper.dev API key not found. Please set SERPAPI_KEY "
-                "environment variable or provide api_key in config"
+        config = config or {}
+        provider = (
+            config.get("provider")
+            or os.getenv("WEB_SEARCH_PROVIDER")
+            or os.getenv("SEARCH_API_PROVIDER")
+            or ("bocha" if os.getenv("BOCHA_API_KEY") else "serper")
+        )
+        self.provider = provider.lower()
+
+        if self.provider == "bocha":
+            self.api_key = config.get("api_key") or os.getenv("BOCHA_API_KEY")
+            self.api_endpoint = (
+                config.get("api_endpoint")
+                or os.getenv("BOCHA_SEARCH_ENDPOINT")
+                or "https://api.bochaai.com/v1/web-search"
             )
-        
+            if not self.api_key:
+                raise ValueError(
+                    "Bocha API key not found. Please set BOCHA_API_KEY "
+                    "or provide api_key in config."
+                )
+        elif self.provider == "serper":
+            self.api_key = config.get("api_key") or os.getenv("SERPAPI_KEY")
+            self.api_endpoint = config.get("api_endpoint") or "https://google.serper.dev/search"
+            if not self.api_key:
+                raise ValueError(
+                    "Serper.dev API key not found. Please set SERPAPI_KEY "
+                    "or provide api_key in config."
+                )
+        else:
+            raise ValueError(f"Unsupported web search provider: {self.provider}")
+
         self.max_results_default = config.get('max_results', 10) if config else 10
-        self.api_endpoint = "https://google.serper.dev/search"
         self.timeout = config.get('timeout', 30) if config else 30
         
         # Proxy configuration (read from environment variable)
@@ -91,18 +112,9 @@ class WebSearch(BaseTool):
         
         for attempt in range(max_retries):
             try:
-                print(f"[WebSearch] Searching for: {query} (attempt {attempt + 1}/{max_retries})")
-                
-                # Prepare request
-                headers = {
-                    "X-API-KEY": self.api_key,
-                    "Content-Type": "application/json"
-                }
-                
-                payload = {
-                    "q": query,
-                    "num": min(max_results, 100)  # Serper.dev supports up to 100 results
-                }
+                print(f"[WebSearch:{self.provider}] Searching for: {query} (attempt {attempt + 1}/{max_retries})")
+
+                headers, payload = self._build_request(query, max_results)
                 
                 # Send request (supports proxy)
                 response = requests.post(
@@ -139,12 +151,7 @@ class WebSearch(BaseTool):
                         continue
                     return f"Error: {error_msg}"
                 
-                # Extract search results (supports multiple response formats)
-                organic_results = result_data.get("organic", [])
-                
-                # If not found, try other possible field names
-                if not organic_results:
-                    organic_results = result_data.get("organic_results", [])
+                organic_results = self._extract_results(result_data)
                 
                 if not organic_results:
                     # Check if there is error information
@@ -160,8 +167,8 @@ class WebSearch(BaseTool):
                 formatted_results = []
                 for i, result in enumerate(organic_results, 1):
                     title = result.get('title', 'No title')
-                    link = result.get('link', 'No URL')
-                    snippet = result.get('snippet', 'No description')
+                    link = result.get('link') or result.get('url') or 'No URL'
+                    snippet = result.get('snippet') or result.get('summary') or result.get('content') or 'No description'
                     
                     formatted_results.append(
                         f"{i}. [{title}]({link})\n"
@@ -207,3 +214,54 @@ class WebSearch(BaseTool):
         
         # If all retries fail, return error
         return "Error: All retry attempts failed"
+
+    def _build_request(self, query, max_results):
+        if self.provider == "bocha":
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+            payload = {
+                "query": query,
+                "freshness": os.getenv("BOCHA_SEARCH_FRESHNESS", "noLimit"),
+                "summary": os.getenv("BOCHA_SEARCH_SUMMARY", "true").lower() not in ("0", "false", "no"),
+                "count": min(int(max_results), 50),
+            }
+            return headers, payload
+
+        headers = {
+            "X-API-KEY": self.api_key,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "q": query,
+            "num": min(int(max_results), 100),
+        }
+        return headers, payload
+
+    def _extract_results(self, result_data):
+        if self.provider == "bocha":
+            data = result_data.get("data", {}) if isinstance(result_data, dict) else {}
+            web_pages = data.get("webPages", {}) if isinstance(data, dict) else {}
+            value = web_pages.get("value", []) if isinstance(web_pages, dict) else []
+            if value:
+                return [
+                    {
+                        "title": item.get("name") or item.get("title"),
+                        "link": item.get("url"),
+                        "snippet": item.get("summary") or item.get("snippet"),
+                    }
+                    for item in value
+                ]
+
+            # Keep a permissive fallback for proxy variants of Bocha.
+            for key in ("results", "webPages", "organic", "organic_results"):
+                candidates = data.get(key) if isinstance(data, dict) else result_data.get(key)
+                if isinstance(candidates, list):
+                    return candidates
+            return []
+
+        organic_results = result_data.get("organic", [])
+        if not organic_results:
+            organic_results = result_data.get("organic_results", [])
+        return organic_results
