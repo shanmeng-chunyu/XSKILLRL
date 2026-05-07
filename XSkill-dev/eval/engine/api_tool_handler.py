@@ -293,6 +293,7 @@ class APIToolHandler:
             tool_kwargs['image_map'] = node.image_map.copy()
         if tool_name == 'image_search':
             tool_kwargs['save_dir'] = self.save_dir
+            tool_kwargs['image_map'] = node.image_map.copy()
         
         return tool_kwargs
     

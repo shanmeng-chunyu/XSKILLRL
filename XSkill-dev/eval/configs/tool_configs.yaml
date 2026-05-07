@@ -15,15 +15,15 @@ zoom:
 
 # WebSearch configuration
 web_search:
-  # Supported: bocha, serper. Leave empty to use SEARCH_API_PROVIDER env.
-  provider: ""
+  # Domestic workflow supports Bocha only.
+  provider: "bocha"
   max_results: 10
   timeout: 10
 
 
 # Visit configuration
 visit:
-  # Supported: local, auto, jina. local uses requests + trafilatura only.
+  # Domestic workflow supports local requests + trafilatura only.
   backend: "local"
   max_content_length: 150000
   timeout: 120
@@ -34,7 +34,8 @@ visit:
 
 # ImageSearch configuration
 image_search:
-  imgbb_api_key: ""
+  provider: "bocha"
   max_results: 5
-  search_image_max_pixels: 1000000
-  search_image_quality: 85
+  timeout: 30
+  image_query_suffix: " 图片"
+  caption_timeout: 120

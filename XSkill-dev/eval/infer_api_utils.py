@@ -57,9 +57,9 @@ def initialize_experience_retriever(args):
                     # Default: cache in the same directory as the experience library JSON
                     enable_cache = getattr(args, 'experience_embedding_cache_enable', True)
                     cache_dir = os.path.dirname(args.experience_library) if args.experience_library else None
-                    embedding_model = os.environ.get("EXPERIENCE_EMBEDDING_MODEL", "text-embedding-3-small")
-                    embedding_api_key = getattr(args, 'experience_embedding_api_key', None) or os.environ.get("EXPERIENCE_EMBEDDING_API_KEY") or os.environ.get("OPENAI_API_KEY")
-                    embedding_endpoint = getattr(args, 'experience_embedding_endpoint', None) or os.environ.get("EXPERIENCE_EMBEDDING_ENDPOINT") or os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
+                    embedding_model = os.environ.get("EXPERIENCE_EMBEDDING_MODEL", "BAAI/bge-m3")
+                    embedding_api_key = getattr(args, 'experience_embedding_api_key', None) or os.environ.get("EXPERIENCE_EMBEDDING_API_KEY")
+                    embedding_endpoint = getattr(args, 'experience_embedding_endpoint', None) or os.environ.get("EXPERIENCE_EMBEDDING_ENDPOINT")
                     
                     # Normalize endpoint
                     if embedding_endpoint and not embedding_endpoint.endswith("/v1"):

@@ -47,23 +47,19 @@ export EXPERIENCE_EMBEDDING_ENDPOINT=""
 # ============================================================================
 # Function Calling Configuration
 # ============================================================================
-# Web search provider. Bocha replaces the old Serper/SERPAPI web_search path.
+# Web/image search provider. Both web_search and image_search use Bocha.
+# Reverse image search is local VLM caption -> Bocha search; no image upload.
 export SEARCH_API_PROVIDER="bocha"
+export IMAGE_SEARCH_PROVIDER="bocha"
 export BOCHA_API_KEY=""
 
-# Only needed if using image_search or SEARCH_API_PROVIDER=serper.
-export SERPAPI_KEY=""
-
-# Visit uses local requests + trafilatura by default. Set VISIT_BACKEND=auto
-# and JINA_API_KEY to enable Jina Reader fallback.
+# Visit uses local requests + trafilatura only.
 export VISIT_BACKEND="local"
-export JINA_API_KEY=""
 
 export ENABLE_FUNCTION_CALLING="true"
 
 # Available tools: web_search, image_search, visit, code_interpreter, zoom
-# export ENABLED_TOOLS="web_search, image_search, visit, code_interpreter"
-export ENABLED_TOOLS="web_search, visit, code_interpreter"
+export ENABLED_TOOLS="web_search, image_search, visit, code_interpreter"
 
 TOOL_CONFIG_PATH="eval/configs/tool_configs.yaml"
 

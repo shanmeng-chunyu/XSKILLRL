@@ -79,7 +79,7 @@ class ExperienceRetriever:
     def __init__(
         self,
         experiences: Dict[str, str],
-        embedding_model: str = "text-embedding-3-small",
+        embedding_model: str = "BAAI/bge-m3",
         embedding_api_key: Optional[str] = None,
         embedding_endpoint: Optional[str] = None,
         cache_dir: Optional[str] = None,
@@ -94,8 +94,8 @@ class ExperienceRetriever:
             experiences: Dictionary mapping experience IDs to experience text
             embedding_model: Embedding model name. For local embeddings, use a
                 sentence-transformers compatible model such as BAAI/bge-m3.
-            embedding_api_key: API key for embedding service (defaults to EXPERIENCE_EMBEDDING_API_KEY or OPENAI_API_KEY)
-            embedding_endpoint: API endpoint for embedding service (defaults to EXPERIENCE_EMBEDDING_ENDPOINT or OPENAI_API_BASE)
+            embedding_api_key: API key for an explicitly configured local/OpenAI-compatible embedding service.
+            embedding_endpoint: API endpoint for an explicitly configured local/OpenAI-compatible embedding service.
             cache_dir: Directory to cache embeddings (defaults to experience/embeddings/{library_name}/)
             enable_cache: Whether to enable disk caching of embeddings
             llm_client: Optional ExperienceLLM instance for task decomposition (used by retrieve_with_decomposition)
@@ -115,18 +115,16 @@ class ExperienceRetriever:
         self.embedding_api_key = (
             embedding_api_key 
             or os.environ.get("EXPERIENCE_EMBEDDING_API_KEY")
-            or os.environ.get("OPENAI_API_KEY")
         )
 
         self.embedding_endpoint = (
             embedding_endpoint
             or os.environ.get("EXPERIENCE_EMBEDDING_ENDPOINT")
-            or os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
         )
 
         self.embedding_backend = (
             os.environ.get("EXPERIENCE_EMBEDDING_BACKEND")
-            or ("api" if self.embedding_api_key else "local")
+            or "local"
         ).lower()
         if self.embedding_backend not in ("api", "local"):
             raise ValueError(
@@ -152,7 +150,12 @@ class ExperienceRetriever:
         if self.embedding_backend == "api" and not self.embedding_api_key:
             raise ValueError(
                 "Embedding API key is required. Set EXPERIENCE_EMBEDDING_API_KEY "
-                "or OPENAI_API_KEY environment variable, or pass embedding_api_key parameter."
+                "environment variable, or pass embedding_api_key parameter."
+            )
+        if self.embedding_backend == "api" and not self.embedding_endpoint:
+            raise ValueError(
+                "Embedding API endpoint is required when EXPERIENCE_EMBEDDING_BACKEND=api. "
+                "Set EXPERIENCE_EMBEDDING_ENDPOINT or pass embedding_endpoint."
             )
         
         # Embedding storage: {exp_id: np.ndarray}

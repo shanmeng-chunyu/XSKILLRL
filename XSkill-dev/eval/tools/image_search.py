@@ -1,697 +1,483 @@
 """
-ImageSearch Tool - Use Serper.dev Google Images Search API for image search
-Support text query image search and reverse image search (image search by image).
+ImageSearch tool using China-accessible backends.
+
+Text image search uses Bocha Web Search. Reverse image search is implemented as
+"local VLM caption/keywords -> Bocha search" so it does not upload images to
+foreign image hosting services or call external reverse-image APIs.
 """
 
-import os
+import base64
 import json
-import requests
+import os
 from io import BytesIO
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import requests
 from PIL import Image
+
 from tools.base import BaseTool
 from tools.tool_registry import register_tool
+from utils.context_utils import pil_to_base64_data_uri
 
 
 @register_tool("image_search")
 class ImageSearch(BaseTool):
     name = "image_search"
-    description = '''
+    description = """
 Search for related images using text query or reverse image search.
 - For text-to-image search: specify search_type="text" and provide a query.
-- For reverse image search: specify search_type="reverse" and provide an image_url.
-Returns images with URLs and descriptions.
+- For reverse image search: specify search_type="reverse" and provide image_url.
 
-Notice:
-To perform reverse image search, specify the image name directly.
-- "original_image" - use the original input image
-- "tool_image_N" - use tool-generated image N (from tool outputs, e.g., tool_image_1, tool_image_2)
-- "observation_N" - use zoomed image regions from earlier zoom operations (e.g., observation_1, observation_2)
-- Image URLs: Direct URL string (http:// or https://) from previous search results or other sources
+Reverse image search does not call an external reverse-image API. It first asks
+the local reasoning VLM to describe the image as search keywords, then searches
+Bocha with those keywords.
 
-You only have limited search times, so please use it wisely.
-'''
+Image references for reverse search:
+- "original_image" or "original_image_N"
+- "tool_image_N"
+- "observation_N"
+- a local image path
+- an http(s) image URL
+"""
     parameters = {
         "type": "object",
         "properties": {
             "search_type": {
                 "type": "string",
                 "enum": ["text", "reverse"],
-                "description": "Type of search: 'text' for text-to-image search, 'reverse' for reverse image search",
-                "default": "text"
+                "description": "Type of search: 'text' or 'reverse'",
+                "default": "text",
             },
             "query": {
                 "type": "string",
-                "description": "Search query string (required for text search)"
+                "description": "Search query string. Required for text search and optional for reverse search.",
             },
             "image_url": {
                 "type": "string",
-                "description": "Image filename, local reference, or URL (required for reverse search). Use 'original_image', 'tool_image_N', 'observation_N', or a direct image URL (http://... or https://...)"
+                "description": "Image reference or URL for reverse search.",
             },
             "max_results": {
                 "type": "integer",
-                "description": "Maximum number of image results to return (default: 10)",
-                "default": 10
-            }
+                "description": "Maximum number of results to return.",
+                "default": 10,
+            },
         },
-        "required": []  # query or image_url is required
+        "required": [],
     }
-    
+
     def __init__(self, config=None):
         super().__init__(config)
-        
-        # Get API key from environment variable
-        self.api_key = os.getenv("SERPAPI_KEY")
-        
-        # Get from config (if provided)
-        if config and 'api_key' in config and config['api_key']:
-            self.api_key = config['api_key']
-        
-        if not self.api_key:
+        config = config or {}
+
+        self.provider = (
+            config.get("provider")
+            or os.getenv("IMAGE_SEARCH_PROVIDER")
+            or "bocha"
+        ).lower()
+        if self.provider != "bocha":
             raise ValueError(
-                "Serper.dev API key not found. Please set SERPAPI_KEY "
-                "environment variable or provide api_key in config"
+                "Only IMAGE_SEARCH_PROVIDER=bocha is supported for the domestic image search backend."
             )
-        
-        self.max_results_default = config.get('max_results', 10) if config else 10
-        self.search_type_default = config.get('search_type', 'text') if config else 'text'
-        self.api_endpoint = "https://google.serper.dev/images"  # Text image search endpoint
-        self.reverse_image_endpoint = "https://google.serper.dev/lens"  # Reverse image search endpoint (using Serper.dev /lens API)
-        self.timeout = config.get('timeout', 100) if config else 100  # Increase timeout, because reverse image search may take longer
-        self.download_image_counter = 0  # Used to generate unique image file names
-        
-        # Search image compression configuration (get from config, if not provided, use default value)
-        # Get args from config (if passed via api_tool_handler, args is Namespace object)
-        args_obj = config.get('args') if config and isinstance(config, dict) else None
-        if args_obj:
-            # args is Namespace object, use getattr to access properties
-            global_max_pixels = getattr(args_obj, 'max_pixels', 2000000)
-            global_min_pixels = getattr(args_obj, 'min_pixels', 40000)
-        else:
-            global_max_pixels = 2000000
-            global_min_pixels = 40000
-        
-        # Search image using more strict compression parameters (configurable, default is half of global)
-        if config and isinstance(config, dict):
-            self.search_image_max_pixels = config.get('search_image_max_pixels', global_max_pixels // 2)
-            self.search_image_quality = config.get('search_image_quality', 75)
-        else:
-            self.search_image_max_pixels = global_max_pixels // 2
-            self.search_image_quality = 75
-        self.search_image_min_pixels = global_min_pixels  # Use global min_pixels
-        
-        # Proxy configuration (read from environment variables)
+
+        self.api_key = config.get("api_key") or os.getenv("BOCHA_API_KEY")
+        if not self.api_key:
+            raise ValueError("BOCHA_API_KEY is required for image_search.")
+
+        self.api_endpoint = (
+            config.get("api_endpoint")
+            or os.getenv("BOCHA_SEARCH_ENDPOINT")
+            or "https://api.bochaai.com/v1/web-search"
+        )
+        self.max_results_default = int(config.get("max_results", 10))
+        self.search_type_default = config.get("search_type", "text")
+        self.timeout = int(config.get("timeout", 30))
+        self.image_query_suffix = (
+            config.get("image_query_suffix")
+            or os.getenv("BOCHA_IMAGE_SEARCH_SUFFIX")
+            or " 图片"
+        )
+
+        self.caption_model = (
+            config.get("caption_model")
+            or os.getenv("IMAGE_SEARCH_CAPTION_MODEL")
+            or os.getenv("REASONING_MODEL_NAME")
+        )
+        self.caption_api_key = (
+            config.get("caption_api_key")
+            or os.getenv("IMAGE_SEARCH_CAPTION_API_KEY")
+            or os.getenv("REASONING_API_KEY")
+            or "EMPTY"
+        )
+        self.caption_endpoint = (
+            config.get("caption_endpoint")
+            or os.getenv("IMAGE_SEARCH_CAPTION_ENDPOINT")
+            or os.getenv("REASONING_END_POINT")
+        )
+        self.caption_endpoint = self._normalize_chat_endpoint(self.caption_endpoint)
+        self.caption_timeout = int(config.get("caption_timeout", 120))
+
         self.proxies = None
         http_proxy = os.getenv("HTTP_PROXY") or os.getenv("http_proxy")
         https_proxy = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
         if http_proxy or https_proxy:
             self.proxies = {
                 "http": http_proxy,
-                "https": https_proxy or http_proxy
+                "https": https_proxy or http_proxy,
             }
             print(f"[ImageSearch] Using proxy: {self.proxies}")
-    
-    def _upload_local_image(self, image_path, max_retries=3, timeout=30):
-        """
-        Upload local image to image hosting service
-        支持多个图床服务，按优先级自动切换：
-        1. ImgBB (https://api.imgbb.com) - Requires API key, stable and reliable
-        2. cloudflareimg.cdn.sn - Supports webp compression, no registration required
-        3. 0x0.st (https://0x0.st) - Anonymous file upload service, no registration required, stable and reliable
-        4. catbox.moe (https://catbox.moe) - Anonymous image upload service, no registration required, backup solution
-        
-        Support automatic retry mechanism, automatically switch to next service on failure
 
-        Args:
-            image_path: Local image path
-            max_retries: Maximum number of retries for each service
-            timeout: Timeout in seconds
-            
-        Returns:
-            Image URL, None if failed
-        """
-        print(f"[ImageSearch] Uploading local image: {image_path}")
-        
-        def parse_0x0_response(response):
-            """Parse 0x0.st response (return pure text URL)"""
-            try:
-                url = response.text.strip()
-                if url.startswith('http://') or url.startswith('https://'):
-                    return url
-            except:
-                pass
-            return None
-        
-        def parse_catbox_response(response):
-            """Parse catbox.moe response (return pure text URL)"""
-            try:
-                url = response.text.strip()
-                if url.startswith('http://') or url.startswith('https://'):
-                    return url
-            except:
-                pass
-            return None
-        
-        def parse_imgbb_response(response):
-            """Parse ImgBB response (JSON format)"""
-            try:
-                result = response.json()
-                if result.get('success'):
-                    return result.get('data', {}).get('url')
-            except:
-                pass
-            return None
-        
-        def parse_cloudflareimg_response(response):
-            """Parse cloudflareimg.cdn.sn response (JSON format)"""
-            try:
-                result = response.json()
-                if result.get('success'):
-                    uploaded_url = result.get('url')
-                    # Display compression information (if available)
-                    if 'data' in result:
-                        compression_ratio = result['data'].get('compression_ratio', 0)
-                        if compression_ratio:
-                            print(f"[ImageSearch] Compression ratio: {compression_ratio}%")
-                    return uploaded_url
-            except:
-                pass
-            return None
-        
-        # Define multiple image hosting service configurations, sorted by priority
-        upload_services = []
-        
-        # 1. Try ImgBB (if API key is provided, more stable and reliable)
-        imgbb_key = os.getenv('IMGBB_API_KEY') or (self.config.get('imgbb_api_key') if hasattr(self, 'config') and self.config else None)
-        if imgbb_key:
-            upload_services.append({
-                'name': 'ImgBB',
-                'url': 'https://api.imgbb.com/1/upload',
-                'files_key': 'image',  # ImgBB uses image as file field name
-                'parse_response': parse_imgbb_response,
-                'extra_data': {'key': imgbb_key}  # ImgBB requires API key
-            })
-        
-        # 2. cloudflareimg.cdn.sn (supports webp compression, no API key required)
-        upload_services.append({
-            'name': 'cloudflareimg.cdn.sn',
-            'url': 'https://cloudflareimg.cdn.sn/api/v1.php',
-            'files_key': 'image',  # cloudflareimg.cdn.sn uses image as file field name
-            'parse_response': parse_cloudflareimg_response,
-            'extra_data': {'outputFormat': 'webp'}  # Use webp format for better compression rate
-        })
-        
-        # 3. Anonymous service (no API key required)
-        upload_services.extend([
-            {
-                'name': '0x0.st',
-                'url': 'https://0x0.st',
-                'files_key': 'file',  # 0x0.st uses file as file field name, return pure text URL
-                'parse_response': parse_0x0_response
-            },
-            {
-                'name': 'catbox.moe',
-                'url': 'https://catbox.moe/user/api.php',
-                'files_key': 'fileToUpload',  # catbox.moe uses fileToUpload as file field name, return pure text URL
-                'parse_response': parse_catbox_response,
-                'extra_data': {'reqtype': 'fileupload'}  # catbox.moe requires additional parameters
-            }
-        ])
-        
-        # Try each image hosting service in order
-        for service in upload_services:
-            print(f"[ImageSearch] Trying {service['name']}...")
-            
-            for attempt in range(max_retries):
-                try:
-                    with open(image_path, 'rb') as f:
-                        filename = os.path.basename(image_path)
-                        
-                        # Build file dictionary
-                        files = {service['files_key']: (filename, f, 'image/jpeg')}
-                        
-                        # Build additional data parameters
-                        data = service.get('extra_data', {}).copy()
-                        
-                        response = requests.post(
-                            service['url'],
-                            files=files,
-                            data=data,
-                            timeout=timeout,
-                            proxies=self.proxies if hasattr(self, 'proxies') else None
-                        )
-                    
-                    if response.status_code == 200:
-                        # Parse response to get image URL
-                        uploaded_url = service['parse_response'](response)
-                        
-                        if uploaded_url:
-                            print(f"[ImageSearch] Successfully uploaded to {service['name']}: {uploaded_url}")
-                            return uploaded_url
-                        else:
-                            print(f"[ImageSearch] {service['name']} upload failed: Invalid response format - {response.text[:200]}")
-                    else:
-                        print(f"[ImageSearch] {service['name']} upload failed with status {response.status_code}: {response.text[:200]}")
-                        
-                except requests.exceptions.Timeout:
-                    print(f"[ImageSearch] {service['name']} upload timeout (attempt {attempt + 1}/{max_retries})")
-                except Exception as e:
-                    print(f"[ImageSearch] {service['name']} upload error (attempt {attempt + 1}/{max_retries}): {e}")
-                
-                # If not the last attempt, wait a bit and try again
-                if attempt < max_retries - 1:
-                    import time
-                    time.sleep(2)  # Wait 2 seconds to avoid triggering frequency limit
-            
-            # Current service failed, try next service
-            print(f"[ImageSearch] {service['name']} failed, trying next service...")
-        
-        print(f"[ImageSearch] All upload services failed for {image_path}")
-        return None
-    
-    def _download_image(self, image_url, save_dir, max_retries=3, timeout=10):
-        """
-        Download image and save to local
-        
-        Args:
-            image_url: Image URL
-            save_dir: Save directory
-            max_retries: Maximum number of retries
-            timeout: Timeout in seconds
-            
-        Returns:
-            Local file path, None if failed
-        """
-        if not save_dir:
-            return None
-        
-        # Generate file name
-        self.download_image_counter += 1
-        filename = f"search_image_{self.download_image_counter}.jpg"
-        filepath = os.path.join(save_dir, filename)
-        
-        print(f"[ImageSearch] Downloading {image_url[:80]}...")
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-        }
-        
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(
-                    image_url, 
-                    headers=headers, 
-                    timeout=timeout, 
-                    stream=True,
-                    proxies=self.proxies if hasattr(self, 'proxies') else None
-                )
-                if response.status_code == 200:
-                    # Verify if it is a valid image
-                    img_data = BytesIO(response.content)
-                    img = Image.open(img_data)
-                    img.verify()
-                    
-                    # Reload (after verify, need to reopen)
-                    img_data.seek(0)
-                    img = Image.open(img_data)
-                    
-                    # Convert to RGB
-                    if img.mode != 'RGB':
-                        img = img.convert('RGB')
-                    
-                    # Use process_image for compression (more strict parameters for search images)
-                    from utils.context_utils import process_image
-                    original_size = img.width * img.height
-                    compressed_img = process_image(img, self.search_image_max_pixels, self.search_image_min_pixels)
-                    compressed_size = compressed_img.width * compressed_img.height
-                    
-                    # Save compressed image (use lower quality to further reduce file size)
-                    compressed_img.save(filepath, 'JPEG', quality=self.search_image_quality)
-                    
-                    # Record compression information
-                    if original_size != compressed_size:
-                        print(f"[ImageSearch] Downloaded and compressed: {filename} ({img.width}x{img.height} -> {compressed_img.width}x{compressed_img.height})")
-                    else:
-                        print(f"[ImageSearch] Downloaded: {filename} ({compressed_img.width}x{compressed_img.height})")
-                    
-                    return filepath
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    print(f"[ImageSearch] Failed to download image: {e}")
-        
-        return None
-    
+    def _normalize_chat_endpoint(self, endpoint: Optional[str]) -> Optional[str]:
+        if not endpoint:
+            return endpoint
+        endpoint = endpoint.rstrip("/")
+        if endpoint.endswith("/chat/completions"):
+            return endpoint
+        return f"{endpoint}/chat/completions"
+
     def call(self, params, **kwargs):
-        """
-        Execute image search (text search or reverse image search)
-        
-        Args:
-            params: Dictionary containing search_type, query or image_url
-            **kwargs: Additional parameters, can contain save_dir for downloading images
-            
-        Returns:
-            Formatted search result string
-        """
-        # 解析参数
         if isinstance(params, str):
             try:
                 params = json.loads(params)
             except json.JSONDecodeError:
-                # If parsing fails, assume it is query
                 params = {"query": params, "search_type": "text"}
-        
-        search_type = params.get("search_type", self.search_type_default)
-        max_results = params.get("max_results", self.max_results_default)
-        save_dir = kwargs.get("save_dir", None)
-        
-        # Standardize search_type
-        if search_type in ["image", "reverse"]:
-            search_type = "reverse"
-        
+
+        search_type = str(params.get("search_type", self.search_type_default)).lower()
+        max_results = int(params.get("max_results", self.max_results_default))
+
+        if search_type in ("image", "reverse"):
+            return self._reverse_image_search(
+                params,
+                max_results=max_results,
+                image_map=kwargs.get("image_map") or {},
+                save_dir=kwargs.get("save_dir"),
+            )
         if search_type == "text":
-            return self._text_to_image_search(params, max_results, save_dir)
-        elif search_type == "reverse":
-            return self._reverse_image_search(params, max_results, save_dir)
-        else:
-            return f"Error: Invalid search_type '{search_type}'. Must be 'text' or 'reverse'"
-    
-    def _text_to_image_search(self, params, max_results, save_dir=None):
-        """
-        Text query image
-        
-        Args:
-            params: Dictionary containing query
-            max_results: Maximum number of results
-            save_dir: Save directory (if provided, download images)
-            
-        Returns:
-            Formatted search result
-        """
-        query = params.get("query", "")
+            query = params.get("query", "")
+            if not query:
+                return "Error: No query provided for text image search"
+            return self._bocha_image_search(query, max_results=max_results)
+
+        return f"Error: Invalid search_type '{search_type}'. Must be 'text' or 'reverse'"
+
+    def _reverse_image_search(
+        self,
+        params: Dict[str, Any],
+        *,
+        max_results: int,
+        image_map: Dict[str, Image.Image],
+        save_dir: Optional[str],
+    ) -> str:
+        image_ref = params.get("image_url", "")
+        if not image_ref:
+            return "Error: No image_url provided for reverse image search"
+
+        image = self._resolve_image(image_ref, image_map=image_map, save_dir=save_dir)
+        if image is None:
+            return (
+                f"Error: Could not resolve image reference '{image_ref}'. "
+                "Use original_image, tool_image_N, observation_N, a local path, or an image URL."
+            )
+
+        caption = self._caption_image_for_search(image)
+        if not caption:
+            fallback_query = params.get("query")
+            if not fallback_query:
+                return "Error: Failed to caption image for domestic reverse image search"
+            caption = fallback_query
+
+        query_hint = params.get("query")
+        search_query = f"{query_hint}; {caption}" if query_hint else caption
+        result = self._bocha_image_search(search_query, max_results=max_results)
+        return (
+            "Reverse image search was performed via local VLM caption + Bocha search.\n\n"
+            f"Image search keywords: {caption}\n\n"
+            f"{result}"
+        )
+
+    def _resolve_image(
+        self,
+        image_ref: str,
+        *,
+        image_map: Dict[str, Image.Image],
+        save_dir: Optional[str],
+    ) -> Optional[Image.Image]:
+        if image_ref in image_map:
+            return image_map[image_ref]
+
+        candidates = []
+        ref_path = Path(image_ref)
+        candidates.append(ref_path)
+
+        if save_dir:
+            save_root = Path(save_dir)
+            candidates.append(save_root / image_ref)
+            if ref_path.suffix == "":
+                for suffix in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+                    candidates.append(save_root / f"{image_ref}{suffix}")
+
+        for candidate in candidates:
+            if candidate.is_file():
+                try:
+                    return Image.open(candidate).convert("RGB")
+                except Exception as exc:
+                    print(f"[ImageSearch] Failed to open local image {candidate}: {exc}")
+
+        if image_ref.startswith(("http://", "https://")):
+            try:
+                response = requests.get(image_ref, timeout=self.timeout, proxies=self.proxies)
+                response.raise_for_status()
+                return Image.open(BytesIO(response.content)).convert("RGB")
+            except Exception as exc:
+                print(f"[ImageSearch] Failed to download image URL {image_ref}: {exc}")
+                return None
+
+        if image_ref.startswith("data:image/"):
+            try:
+                _, payload = image_ref.split(",", 1)
+                return Image.open(BytesIO(base64.b64decode(payload))).convert("RGB")
+            except Exception as exc:
+                print(f"[ImageSearch] Failed to parse data URI image: {exc}")
+                return None
+
+        return None
+
+    def _caption_image_for_search(self, image: Image.Image) -> Optional[str]:
+        if not self.caption_endpoint or not self.caption_model:
+            print("[ImageSearch] Caption endpoint/model not configured")
+            return None
+
+        prompt = (
+            "请为这张图片生成适合中文网页和图片搜索的关键词。"
+            "包含主体、品牌/地标/人物/文字、颜色、场景、显著细节。"
+            "如果不确定，不要编造。只输出一行关键词，中英文都可以。"
+        )
+        payload = {
+            "model": self.caption_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": pil_to_base64_data_uri(image)}},
+                    ],
+                }
+            ],
+            "temperature": 0.1,
+            "top_p": 1.0,
+            "max_tokens": 512,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.caption_api_key}",
+        }
+
+        try:
+            response = requests.post(
+                self.caption_endpoint,
+                headers=headers,
+                json=payload,
+                timeout=self.caption_timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            content = str(content).strip()
+            return content or None
+        except Exception as exc:
+            print(f"[ImageSearch] Local VLM caption failed: {exc}")
+            return None
+
+    def _bocha_image_search(self, query: str, *, max_results: int) -> str:
+        search_query = self._make_image_query(query)
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "query": search_query,
+            "freshness": os.getenv("BOCHA_SEARCH_FRESHNESS", "noLimit"),
+            "summary": os.getenv("BOCHA_SEARCH_SUMMARY", "true").lower() not in ("0", "false", "no"),
+            "count": min(max_results, 50),
+        }
+
+        try:
+            print(f"[ImageSearch:bocha] Searching images/pages for: {search_query}")
+            response = requests.post(
+                self.api_endpoint,
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+                proxies=self.proxies,
+            )
+            response.raise_for_status()
+            result_data = response.json()
+        except Exception as exc:
+            return f"Error: Bocha image search failed: {exc}"
+
+        image_results = self._extract_image_results(result_data)
+        if not image_results:
+            image_results = self._extract_webpage_results(result_data)
+
+        image_results = image_results[:max_results]
+        if not image_results:
+            return f"No image or webpage results found for query: '{search_query}'"
+
+        formatted = []
+        for item in image_results:
+            image_url = item.get("image_url") or "N/A"
+            title = item.get("title") or "No title"
+            webpage_url = item.get("webpage_url") or item.get("source_url") or "N/A"
+            snippet = item.get("snippet") or ""
+            entry = f"Image: {image_url}, Text: {title}, Webpage Url: {webpage_url}"
+            if snippet:
+                entry += f", Snippet: {snippet}"
+            formatted.append(entry)
+
+        print(f"[ImageSearch:bocha] Found {len(image_results)} results")
+        return "```\n" + "\n\n".join(formatted) + "\n```"
+
+    def _make_image_query(self, query: str) -> str:
+        query = str(query).strip()
         if not query:
-            return "Error: No query provided for text search"
-        
-        try:
-            print(f"[ImageSearch] Text search for images: {query}")
-            
-            # Prepare request
-            headers = {
-                "X-API-KEY": self.api_key,
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "q": query,
-                "num": min(max_results, 100)  # Serper.dev supports up to 100 results
-            }
-            
-            # Send request (supports proxy, with retry mechanism)
-            max_retries = 3
-            retry_delay = 1
-            response = None
-            
-            for attempt in range(max_retries):
-                try:
-                    response = requests.post(
-                        self.api_endpoint,
-                        headers=headers,
-                        json=payload,
-                        timeout=self.timeout,
-                        proxies=self.proxies
+            return query
+        if self.image_query_suffix and self.image_query_suffix.strip() not in query:
+            return f"{query}{self.image_query_suffix}"
+        return query
+
+    def _extract_image_results(self, result_data: Dict[str, Any]) -> List[Dict[str, str]]:
+        data = result_data.get("data", {}) if isinstance(result_data, dict) else {}
+        results: List[Dict[str, str]] = []
+
+        # Common Bocha/Bing-like image result shape.
+        images = data.get("images") if isinstance(data, dict) else None
+        if isinstance(images, dict):
+            values = images.get("value", [])
+            if isinstance(values, list):
+                for item in values:
+                    parsed = self._parse_image_item(item)
+                    if parsed:
+                        results.append(parsed)
+        elif isinstance(images, list):
+            for item in images:
+                parsed = self._parse_image_item(item)
+                if parsed:
+                    results.append(parsed)
+
+        web_pages = data.get("webPages", {}) if isinstance(data, dict) else {}
+        pages = web_pages.get("value", []) if isinstance(web_pages, dict) else []
+        if isinstance(pages, list):
+            for page in pages:
+                for parsed in self._parse_page_images(page):
+                    results.append(parsed)
+
+        return self._dedupe(results)
+
+    def _extract_webpage_results(self, result_data: Dict[str, Any]) -> List[Dict[str, str]]:
+        data = result_data.get("data", {}) if isinstance(result_data, dict) else {}
+        web_pages = data.get("webPages", {}) if isinstance(data, dict) else {}
+        pages = web_pages.get("value", []) if isinstance(web_pages, dict) else []
+        results = []
+        if isinstance(pages, list):
+            for page in pages:
+                if not isinstance(page, dict):
+                    continue
+                url = page.get("url") or page.get("link")
+                title = page.get("name") or page.get("title")
+                snippet = page.get("summary") or page.get("snippet")
+                if url or title:
+                    results.append(
+                        {
+                            "image_url": "N/A",
+                            "title": title or "No title",
+                            "webpage_url": url or "N/A",
+                            "snippet": snippet or "",
+                        }
                     )
-                    break  # If successful, exit retry loop
-                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                    if attempt < max_retries - 1:
-                        print(f"[ImageSearch] Request failed (attempt {attempt + 1}/{max_retries}): {str(e)}, retrying...")
-                        import time
-                        time.sleep(retry_delay)
-                        retry_delay *= 2
-                        continue
-                    else:
-                        error_msg = f"Connection failed after {max_retries} attempts: {str(e)}. Please check network connection and DNS settings."
-                        print(f"[ImageSearch] {error_msg}")
-                        return f"Error: {error_msg}"
-            
-            if response is None:
-                return "Error: Failed to get response from API"
-            
-            # Check response status
-            if response.status_code != 200:
-                error_msg = f"API request failed with status {response.status_code}: {response.text[:200]}"
-                print(f"[ImageSearch] {error_msg}")
-                return f"Error: {error_msg}"
-            
-            # Parse response
-            try:
-                result_data = response.json()
-            except json.JSONDecodeError as e:
-                error_msg = f"Failed to parse JSON response: {str(e)}. Response: {response.text[:200]}"
-                print(f"[ImageSearch] {error_msg}")
-                return f"Error: {error_msg}"
-            
-            # Extract image search results
-            images = result_data.get("images", [])
-            
-            if not images:
-                # Check if there is error information
-                error_info = result_data.get("error", "")
-                if error_info:
-                    return f"Error: {error_info}"
-                return f"No images found for query: '{query}'"
-            
-            # Limit result number
-            images = images[:max_results]
-            
-            formatted = []
-            
-            for i, img in enumerate(images, 1):
-                title = img.get('title', 'No title')
-                image_url = img.get('imageUrl') or img.get('image_url') or img.get('link', 'N/A')
-                source_url = img.get('link') or img.get('source') or img.get('sourceUrl', 'N/A')
-                
-                # Note: Images are not downloaded to local storage
-                entry = f"Image: {image_url}, Text: {title}, Webpage Url: {source_url}"
-                formatted.append(entry)
-            
-            output = "```\n" + '\n\n'.join(formatted) + "\n```"
-            print(f"[ImageSearch] Found {len(images)} image results (returning URLs only, no markdown images)")
-            return output
-            
-        except requests.exceptions.Timeout:
-            error_msg = "Request timed out"
-            print(f"[ImageSearch] {error_msg}")
-            return f"Error: {error_msg}"
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Request failed: {str(e)}"
-            print(f"[ImageSearch] {error_msg}")
-            return f"Error: {error_msg}"
-        except Exception as e:
-            error_msg = f"Unexpected error during text image search: {str(e)}"
-            print(f"[ImageSearch] {error_msg}")
-            import traceback
-            traceback.print_exc()
-            return f"Error: {error_msg}"
-    
-    def _reverse_image_search(self, params, max_results, save_dir=None):
-        """
-        Reverse image search (image search by image)
-        
-        Args:
-            params: Dictionary containing image_url
-            max_results: Maximum number of results
-            save_dir: Save directory (if provided, download images)
-            
-        Returns:
-            Formatted search result
-        """
-        image_url = params.get("image_url", "")
+        return results
+
+    def _parse_page_images(self, page: Any) -> List[Dict[str, str]]:
+        if not isinstance(page, dict):
+            return []
+        page_url = page.get("url") or page.get("link") or page.get("hostPageUrl")
+        page_title = page.get("name") or page.get("title")
+        page_snippet = page.get("summary") or page.get("snippet")
+        results = []
+
+        for key in ("images", "image", "thumbnail", "thumbnailUrl"):
+            value = page.get(key)
+            if isinstance(value, list):
+                for item in value:
+                    parsed = self._parse_image_item(
+                        item,
+                        default_title=page_title,
+                        default_page_url=page_url,
+                        default_snippet=page_snippet,
+                    )
+                    if parsed:
+                        results.append(parsed)
+            else:
+                parsed = self._parse_image_item(
+                    value,
+                    default_title=page_title,
+                    default_page_url=page_url,
+                    default_snippet=page_snippet,
+                )
+                if parsed:
+                    results.append(parsed)
+
+        return results
+
+    def _parse_image_item(
+        self,
+        item: Any,
+        *,
+        default_title: Optional[str] = None,
+        default_page_url: Optional[str] = None,
+        default_snippet: Optional[str] = None,
+    ) -> Optional[Dict[str, str]]:
+        if isinstance(item, str):
+            if item.startswith(("http://", "https://")):
+                return {
+                    "image_url": item,
+                    "title": default_title or "No title",
+                    "webpage_url": default_page_url or "N/A",
+                    "snippet": default_snippet or "",
+                }
+            return None
+        if not isinstance(item, dict):
+            return None
+
+        image_url = (
+            item.get("contentUrl")
+            or item.get("imageUrl")
+            or item.get("thumbnailUrl")
+            or item.get("image_url")
+            or item.get("url")
+        )
         if not image_url:
-            return "Error: No image_url provided for reverse search"
-        
-        try:
-            # Check if it is a local file path
-            original_image_path = image_url
-            
-            # Check if it is a local file path (exclude already URL or data URI cases)
-            if not image_url.startswith('http://') and not image_url.startswith('https://') and not image_url.startswith('data:'):
-                # Maybe it is a local file path, check if file exists
-                if os.path.exists(image_url) or os.path.isfile(image_url):
-                    print(f"[ImageSearch] Detected local file path: {image_url}")
-                    # Upload local image to image hosting service
-                    uploaded_url = self._upload_local_image(image_url)
-                    if uploaded_url:
-                        image_url = uploaded_url
-                        print(f"[ImageSearch] Using uploaded image URL for reverse search: {uploaded_url}")
-                    else:
-                        return f"Error: Failed to upload local image file {image_url} to image hosting service. Please provide a public image URL instead."
-            
-            print(f"[ImageSearch] Reverse image search for: {image_url[:100]}..." if len(image_url) > 100 else f"[ImageSearch] Reverse image search for: {image_url}")
-            
-            # Prepare request
-            headers = {
-                'X-API-KEY': self.api_key,
-                'Content-Type': 'application/json'
-            }
-            
-            # Use Serper.dev /lens endpoint for reverse image search
-            # Based on test code, use simple payload format: {"url": image_url, "num": max_results}
-            payload = {
-                "url": image_url,
-                "num": min(max_results, 100)  # Limit result number
-            }
-            
-            print(f"[ImageSearch] Sending reverse image search request to Serper.dev /lens")
-            print(f"[ImageSearch] Image URL: {image_url[:80]}...")
-            
-            # Send request (supports proxy, with retry mechanism)
-            # Note: Use data=json.dumps(payload) instead of json=payload, consistent with test code
-            max_retries = 3
-            retry_delay = 1
-            response = None
-            
-            for attempt in range(max_retries):
-                try:
-                    response = requests.post(
-                        self.reverse_image_endpoint,
-                        headers=headers,
-                        data=json.dumps(payload),  # Use data instead of json, and manually serialize
-                        timeout=self.timeout,
-                        proxies=self.proxies
-                    )
-                    
-                    # If successful, exit retry loop
-                    if response.status_code == 200:
-                        break
-                    
-                    # If not the last attempt, wait and try again
-                    if attempt < max_retries - 1:
-                        error_text = response.text[:200] if hasattr(response, 'text') else str(response)
-                        print(f"[ImageSearch] Request failed (attempt {attempt + 1}/{max_retries}): status {response.status_code}, {error_text}, retrying...")
-                        import time
-                        time.sleep(retry_delay)
-                        retry_delay *= 2
-                        continue
-                    
-                    break  # Exit retry loop
-                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                    if attempt < max_retries - 1:
-                        print(f"[ImageSearch] Request failed (attempt {attempt + 1}/{max_retries}): {str(e)}, retrying...")
-                        import time
-                        time.sleep(retry_delay)
-                        retry_delay *= 2
-                        continue
-                    else:
-                        error_msg = f"Connection failed after {max_retries} attempts: {str(e)}. Please check network connection and DNS settings."
-                        print(f"[ImageSearch] {error_msg}")
-                        return f"Error: {error_msg}"
-            
-            if response is None:
-                return "Error: Failed to get response from API"
-            
-            # Check response status
-            if response.status_code != 200:
-                error_text = response.text[:500] if hasattr(response, 'text') else str(response)
-                error_msg = f"API request failed with status {response.status_code}: {error_text}"
-                print(f"[ImageSearch] {error_msg}")
-                return f"Error: {error_msg}"
-            
-            # Parse response
-            try:
-                result_data = response.json()
-            except json.JSONDecodeError as e:
-                error_msg = f"Failed to parse JSON response: {str(e)}. Response: {response.text[:200]}"
-                print(f"[ImageSearch] {error_msg}")
-                return f"Error: {error_msg}"
-            
-            # Serper.dev /lens endpoint returns data structure:
-            # - organic: Search results array (main format)
-            #   Each result contains: title, source, link, imageUrl, thumbnailUrl
-            # - credits: Remaining credits
-            # - searchParameters: Search parameters
-            
-            # Extract all types of matching results
-            all_results = []
-            
-            # Prioritize processing Serper.dev's organic array format
-            organic = result_data.get("organic", [])
-            if organic:
-                print(f"[ImageSearch] Found {len(organic)} organic results from Serper.dev")
-                all_results = organic[:max_results]
-            
-            # If still no results, try other formats (compatible with SerpAPI format)
-            if not all_results:
-                # Visual matching (SerpAPI format)
-                visual_matches = result_data.get("visual_matches", [])
-                if visual_matches:
-                    print(f"[ImageSearch] Found {len(visual_matches)} visual matches")
-                    all_results.extend(visual_matches[:max_results])
-                
-                # Exact matching (SerpAPI format)
-                exact_matches = result_data.get("exact_matches", [])
-                if exact_matches and len(all_results) < max_results:
-                    print(f"[ImageSearch] Found {len(exact_matches)} exact matches")
-                    remaining = max_results - len(all_results)
-                    all_results.extend(exact_matches[:remaining])
-                
-                # Product results (SerpAPI format)
-                products = result_data.get("products", [])
-                if products and len(all_results) < max_results:
-                    print(f"[ImageSearch] Found {len(products)} product matches")
-                    remaining = max_results - len(all_results)
-                    all_results.extend(products[:remaining])
-                
-                # If still no results, try from images field (compatible with old format)
-                if not all_results:
-                    images = result_data.get("images", [])
-                    if images:
-                        print(f"[ImageSearch] Found {len(images)} image results (legacy format)")
-                        all_results = images[:max_results]
-            
-            if not all_results:
-                # Check if there is error information
-                error_info = result_data.get("error", "")
-                if error_info:
-                    return f"Error: {error_info}"
-                # Display simplified prompt
-                display_url = original_image_path if 'original_image_path' in locals() and original_image_path != image_url else image_url
-                return f"No matches found for reverse image search of: {display_url}"
-            
-            # Limit result number
-            all_results = all_results[:max_results]
-            
-            # Format output (align with WebWatcher format: pure text URL, no markdown image reference)
-            formatted = []
-            
-            for i, item in enumerate(all_results, 1):
-                # 处理 Serper.dev 的响应格式
-                title = item.get('title') or item.get('name') or 'No title'
-                # Serper.dev 使用 imageUrl 和 thumbnailUrl
-                image_url_result = item.get('imageUrl') or item.get('thumbnailUrl') or item.get('thumbnail') or item.get('image_url') or item.get('link', 'N/A')
-                source_url = item.get('link') or item.get('source') or item.get('sourceUrl', 'N/A')
-                source_name = item.get('source', 'Unknown')
-                
-                # 构建结果条目（WebWatcher 格式：纯文本 URL）
-                # Note: Images are not downloaded to local storage
-                entry = f"Image: {image_url_result}, Text: {title}, Webpage Url: {source_url}"
-                formatted.append(entry)
-            
-            # 使用 WebWatcher 的代码块格式
-            output = "```\n" + '\n\n'.join(formatted) + "\n```"
-            print(f"[ImageSearch] Found {len(all_results)} reverse search results (returning URLs only, no markdown images)")
-            return output
-            
-        except requests.exceptions.Timeout:
-            error_msg = "Request timed out"
-            print(f"[ImageSearch] {error_msg}")
-            return f"Error: {error_msg}"
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Request failed: {str(e)}"
-            print(f"[ImageSearch] {error_msg}")
-            return f"Error: {error_msg}"
-        except Exception as e:
-            error_msg = f"Unexpected error during reverse image search: {str(e)}"
-            print(f"[ImageSearch] {error_msg}")
-            import traceback
-            traceback.print_exc()
-            return f"Error: {error_msg}"
+            return None
+        return {
+            "image_url": image_url,
+            "title": item.get("name") or item.get("title") or default_title or "No title",
+            "webpage_url": (
+                item.get("hostPageUrl")
+                or item.get("webpageUrl")
+                or item.get("sourceUrl")
+                or item.get("link")
+                or default_page_url
+                or "N/A"
+            ),
+            "snippet": item.get("summary") or item.get("snippet") or default_snippet or "",
+        }
+
+    def _dedupe(self, results: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        seen = set()
+        deduped = []
+        for item in results:
+            key = (item.get("image_url"), item.get("webpage_url"))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped

@@ -873,9 +873,9 @@ if __name__ == "__main__":
     parser.add_argument("--experience-retrieval-min-similarity", type=float, default=0.0,
                         help="Minimum similarity threshold for retrieved experiences (0.0 to 1.0, default: 0.0)")
     parser.add_argument("--experience-embedding-api-key", type=str, default=None,
-                        help="API key for embedding service (defaults to EXPERIENCE_EMBEDDING_API_KEY or OPENAI_API_KEY)")
+                        help="API key for an explicitly configured local/OpenAI-compatible embedding service (defaults to EXPERIENCE_EMBEDDING_API_KEY)")
     parser.add_argument("--experience-embedding-endpoint", type=str, default=None,
-                        help="API endpoint for embedding service (defaults to EXPERIENCE_EMBEDDING_ENDPOINT or OPENAI_API_BASE)")
+                        help="API endpoint for an explicitly configured local/OpenAI-compatible embedding service (defaults to EXPERIENCE_EMBEDDING_ENDPOINT)")
     parser.add_argument("--no-experience-embedding-cache", action='store_false', dest='experience_embedding_cache_enable',
                        default=True, help="Disable disk caching of experience embeddings (default: enabled)")
     parser.add_argument("--experience-retrieval-decomposition", action='store_true',

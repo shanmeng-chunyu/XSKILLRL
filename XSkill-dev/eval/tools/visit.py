@@ -2,8 +2,8 @@
 Visit tool - visit webpage and extract content.
 
 Default behavior is fully local/open-source extraction with requests and
-trafilatura. Jina Reader is optional and only used when VISIT_BACKEND=auto or
-VISIT_BACKEND=jina and JINA_API_KEY is configured.
+trafilatura. Remote reader API fallbacks are disabled for the domestic XSkillRL
+workflow.
 """
 
 import os
@@ -14,11 +14,7 @@ from tools.tool_registry import register_tool
 try:
     import trafilatura
 except ImportError:
-    trafilatura = None  # optional: Jina can be used instead
-
-# Jina API support (fallback when trafilatura fails)
-JINA_API_KEY = os.environ.get("JINA_API_KEY")
-JINA_AVAILABLE = JINA_API_KEY is not None
+    trafilatura = None
 
 
 @register_tool("visit")
@@ -48,14 +44,12 @@ class Visit(BaseTool):
             or os.environ.get("VISIT_BACKEND")
             or "local"
         ).lower()
-        if self.visit_backend not in ("local", "auto", "jina"):
-            raise ValueError(f"Unsupported VISIT_BACKEND: {self.visit_backend}")
-        if self.visit_backend == "local" and trafilatura is None:
+        if self.visit_backend != "local":
+            raise ValueError(
+                "Only VISIT_BACKEND=local is supported in the domestic XSkillRL workflow."
+            )
+        if trafilatura is None:
             raise ImportError("trafilatura is required when VISIT_BACKEND=local")
-        if self.visit_backend == "jina" and not JINA_AVAILABLE:
-            raise ImportError("JINA_API_KEY is required when VISIT_BACKEND=jina")
-        if trafilatura is None and not JINA_AVAILABLE:
-            raise ImportError("Either trafilatura or JINA_API_KEY is required for Visit tool")
         
         # Configuration
         self.max_content_length = config.get('max_content_length', 5000) if config else 5000
@@ -104,26 +98,11 @@ class Visit(BaseTool):
             print(f"[Visit] Fetching URL: {url}")
             print(f"[Visit] Goal: {goal}")
             
-            content = None
-
-            if self.visit_backend == "jina":
-                print("[Visit] Trying Jina API first...")
-                content = self._jina_readpage(url)
-                if content and content.startswith("[visit] Failed to read page."):
-                    content = None
-            elif self.visit_backend in ("local", "auto"):
-                content = self._readpage_local(url)
-
-            if not content and self.visit_backend == "auto" and JINA_AVAILABLE:
-                print("[Visit] Local extraction failed, trying Jina API fallback...")
-                downloaded = self._jina_readpage(url)
-                if downloaded and not downloaded.startswith("[visit] Failed to read page."):
-                    content = downloaded
-                    print(f"[Visit] Jina API extraction successful: {len(content)} characters")
+            content = self._readpage_local(url)
             
             # All methods failed
             if not content:
-                return f"Error: No content extracted from {url} (Jina, requests, and trafilatura all failed)"
+                return f"Error: No content extracted from {url} (requests and trafilatura failed)"
             
             print(f"[Visit] Extracted {len(content)} characters")
             
@@ -326,44 +305,4 @@ Please respond in JSON format with the following fields:
         except Exception as e:
             print(f"[Visit] API call failed: {e}")
             raise  # Re-throw exception, let outer layer catch and return raw content
-    
-    def _jina_readpage(self, url: str) -> str:
-        """
-        Read webpage content using Jina Reader API as fallback.
-        
-        Args:
-            url: The URL to read
-            
-        Returns:
-            str: The webpage content or error message
-        """
-        if not JINA_AVAILABLE:
-            return "[visit] Jina API not available (JINA_API_KEY not set)"
-        
-        headers = {
-            "Authorization": f"Bearer {JINA_API_KEY}",
-        }
-        max_retries = 3
-        timeout = 20
-        
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(
-                    f"https://r.jina.ai/{url}",
-                    headers=headers,
-                    timeout=timeout
-                )
-                if response.status_code == 200:
-                    webpage_content = response.text
-                    return webpage_content
-                else:
-                    print(f"[Visit] Jina API error {response.status_code}: {response.text}")
-                    if attempt == max_retries - 1:
-                        return "[visit] Failed to read page."
-            except Exception as e:
-                print(f"[Visit] Jina API request failed (attempt {attempt + 1}/{max_retries}): {e}")
-                if attempt == max_retries - 1:
-                    return "[visit] Failed to read page."
-        
-        return "[visit] Failed to read page."
 

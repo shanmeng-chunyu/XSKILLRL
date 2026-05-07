@@ -1,34 +1,31 @@
 # Tool and Embedding Backends
 
-本文说明当前项目中搜索、网页访问和 experience embedding 的后端选择。
+本文说明当前项目中搜索、网页访问和 experience embedding 的后端选择。当前默认路线是“境内 API + 本地开源组件”，避免依赖 Serper、Google Lens、Jina Reader、ImgBB、OpenAI Embedding 等境外 API。
 
-## 1. Web Search: Bocha
+## 1. Web Search / Image Search: Bocha
 
-`web_search` 现在支持两种 provider：
+`web_search` 和 `image_search` 均使用博查 Web Search API：
 
-- `bocha`: 博查 Web Search API，使用 `BOCHA_API_KEY`。
-- `serper`: 旧的 Serper.dev API，使用 `SERPAPI_KEY`。
+- `web_search`: 直接把文本 query 发给博查。
+- `image_search` 的文本搜索：把 query 发给博查，并默认补充“图片”关键词。
+- `image_search` 的反向搜图：先用本地 OpenAI-compatible VLM 服务为图片生成搜索关键词，再调用博查搜索；不会上传图片到公共图床，也不会调用 Google Lens/Serper。
 
 推荐配置：
 
 ```bash
 export SEARCH_API_PROVIDER="bocha"
+export IMAGE_SEARCH_PROVIDER="bocha"
 export BOCHA_API_KEY="你的博查API Key"
+
+# 反向搜图复用本地 reasoning VLM；默认会读取 REASONING_*。
+export IMAGE_SEARCH_CAPTION_MODEL="$REASONING_MODEL_NAME"
+export IMAGE_SEARCH_CAPTION_API_KEY="$REASONING_API_KEY"
+export IMAGE_SEARCH_CAPTION_ENDPOINT="$REASONING_END_POINT"
 ```
-
-如果需要回退旧 Serper：
-
-```bash
-export SEARCH_API_PROVIDER="serper"
-export SERPAPI_KEY="你的Serper Key"
-```
-
-注意：`image_search` 仍使用 Serper.dev 的 image/lens API。如果不配置
-`SERPAPI_KEY`，不要在 `ENABLED_TOOLS` 中启用 `image_search`。
 
 ## 2. Visit: Local Open-Source Extraction
 
-`visit` 默认使用本地开源方式：
+`visit` 只使用本地开源方式：
 
 - `requests` 获取网页
 - `trafilatura` 抽取正文
@@ -39,28 +36,11 @@ export SERPAPI_KEY="你的Serper Key"
 export VISIT_BACKEND="local"
 ```
 
-如果希望本地抽取失败后再用 Jina Reader：
-
-```bash
-export VISIT_BACKEND="auto"
-export JINA_API_KEY="你的Jina Key"
-```
-
-如果强制只用 Jina：
-
-```bash
-export VISIT_BACKEND="jina"
-export JINA_API_KEY="你的Jina Key"
-```
+不再启用 Jina Reader fallback。若网页自身在服务器网络中不可访问，`visit` 会返回本地抽取失败，而不会转发给第三方 reader API。
 
 ## 3. Experience Embedding: Local Open-Source Model
 
-Experience retrieval 现在支持：
-
-- `local`: 使用 `sentence-transformers` 本地加载开源 embedding 模型。
-- `api`: 使用 OpenAI-compatible `/embeddings` API。
-
-推荐本地配置：
+Experience retrieval 默认使用本地开源 embedding：
 
 ```bash
 export EXPERIENCE_EMBEDDING_BACKEND="local"
@@ -76,14 +56,29 @@ export EXPERIENCE_EMBEDDING_ENDPOINT=""
 export EXPERIENCE_EMBEDDING_MODEL="BAAI/bge-small-zh-v1.5"
 ```
 
-如果要使用 API embedding：
+`XSkill-dev/requirements.txt` 已包含 `sentence-transformers`。第一次运行会从模型源下载 embedding 模型；如果服务器不能访问 Hugging Face，可以提前把模型下载到本地目录，并把 `EXPERIENCE_EMBEDDING_MODEL` 设置为该本地路径。
+
+## 4. Strict Domestic / Local Configuration
+
+严格不使用境外 API 时，训练和测试脚本中保持以下设置：
 
 ```bash
-export EXPERIENCE_EMBEDDING_BACKEND="api"
-export EXPERIENCE_EMBEDDING_MODEL="text-embedding-3-small"
-export EXPERIENCE_EMBEDDING_API_KEY="你的API Key"
-export EXPERIENCE_EMBEDDING_ENDPOINT="https://api.openai.com/v1"
+export SEARCH_API_PROVIDER="bocha"
+export IMAGE_SEARCH_PROVIDER="bocha"
+export BOCHA_API_KEY="你的博查API Key"
+
+export VISIT_BACKEND="local"
+
+export EXPERIENCE_EMBEDDING_BACKEND="local"
+export EXPERIENCE_EMBEDDING_MODEL="BAAI/bge-m3"
+
+export ENABLED_TOOLS="web_search, image_search, visit, code_interpreter"
 ```
 
-`XSkill-dev/requirements.txt` 已包含 `sentence-transformers`，因此本地 embedding
-不需要额外商业 API。
+同时不要设置或依赖以下旧变量：
+
+- `SERPAPI_KEY`
+- `JINA_API_KEY`
+- `IMGBB_API_KEY`
+- `OPENAI_API_KEY`
+- `OPENAI_API_BASE`
