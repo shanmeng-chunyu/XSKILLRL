@@ -283,6 +283,9 @@ def _load_images_for_retrieval(sample, args):
     image_paths = sample.get('images', [])
     if not image_paths:
         return None
+    max_images = getattr(args, 'max_images', None)
+    if max_images is not None:
+        image_paths = image_paths[:max_images]
     
     images = []
     max_pixels = getattr(args, 'max_pixels', 2000000)
@@ -620,6 +623,7 @@ def get_sample_metadata(sample, sample_idx, output_dir):
         tuple: (question_id, sample_dir)
     """
     question_id = sample.get('doc_id', sample.get('question_id', f"sample_{sample_idx}"))
+    question_id = str(question_id if question_id is not None else f"sample_{sample_idx}")
     sample_dir = os.path.join(output_dir, question_id)
     return question_id, sample_dir
 
@@ -639,6 +643,7 @@ def compute_dataset_summary(data, args):
     sample_summaries = []
     for sample in data:
         question_id = sample.get('doc_id', sample.get('question_id', f"sample_{data.index(sample)}"))
+        question_id = str(question_id if question_id is not None else f"sample_{data.index(sample)}")
         summary_path = os.path.join(args.output_dir, question_id, SAMPLE_SUMMARY_FILENAME)
         if os.path.exists(summary_path):
             with open(summary_path, 'r') as f:
