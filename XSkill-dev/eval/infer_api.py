@@ -44,6 +44,71 @@ from infer_api_utils import (
 )
 
 
+def _normalize_experience_updates(raw_ops):
+    """Normalize model-produced experience updates into batch_merge operations."""
+    if isinstance(raw_ops, str):
+        try:
+            raw_ops = json.loads(raw_ops)
+        except Exception:
+            raw_ops = [{"option": "add", "experience": raw_ops}]
+
+    candidates = []
+    if isinstance(raw_ops, dict):
+        for key in ("experiences", "experience", "operations", "updates", "add", "execution_tips", "decision_rules", "tips", "rules"):
+            value = raw_ops.get(key)
+            if value is None:
+                continue
+            if isinstance(value, dict):
+                candidates.extend(value.values())
+            elif isinstance(value, list):
+                candidates.extend(value)
+            else:
+                candidates.append(value)
+        if not candidates:
+            candidates.append(raw_ops)
+    elif isinstance(raw_ops, list):
+        candidates = raw_ops
+
+    norm_ops = []
+    for item in candidates:
+        if isinstance(item, str):
+            exp_txt = item
+            option = "add"
+            modified_from = None
+        elif isinstance(item, dict):
+            exp_txt = (
+                item.get("experience")
+                or item.get("exp")
+                or item.get("text")
+                or item.get("lesson")
+                or item.get("tip")
+                or item.get("rule")
+                or item.get("content")
+                or item.get("new_experience")
+                or item.get("modified_experience")
+            )
+            if isinstance(exp_txt, list):
+                exp_txt = " ".join(str(part).strip() for part in exp_txt if str(part).strip())
+            option = str(item.get("option") or item.get("action") or item.get("type") or "add").strip().lower()
+            modified_from = item.get("modified_from") or item.get("id") or item.get("experience_id")
+        else:
+            continue
+
+        if not isinstance(exp_txt, str) or not exp_txt.strip():
+            continue
+        if option in ("new", "create", "insert", "addition", "execution_tip", "decision_rule", "tip", "rule"):
+            option = "add"
+        if option not in ("add", "modify"):
+            option = "add"
+
+        op = {"option": option, "experience": exp_txt.strip()}
+        if option == "modify" and modified_from:
+            op["modified_from"] = str(modified_from).strip()
+        norm_ops.append(op)
+
+    return norm_ops
+
+
 def run_single_rollout(sample, args, sampling_params, rollout_idx):
     """
     Run a single rollout for a given sample.
@@ -115,21 +180,44 @@ def generate_experience_for_sample(sample_info, args):
     try:
         llm = ExperienceLLM()
         
+        if not sample_rollout_results:
+            result['error'] = "No successful rollout results"
+            print(f"  Warning: Skipping experience generation for {question_id} - no successful rollout results")
+            return result
+
         traj_paths = []
-        for rollout_idx in range(len(sample_rollout_results)):
+        seen_traj_paths = set()
+        for result_idx, rollout_result in enumerate(sample_rollout_results):
+            rollout_idx = result_idx
+            if isinstance(rollout_result, dict) and rollout_result.get('_rollout_idx') is not None:
+                try:
+                    rollout_idx = int(rollout_result.get('_rollout_idx'))
+                except (TypeError, ValueError):
+                    rollout_idx = result_idx
+
             if args.rollouts_per_sample > 1:
                 rollout_dir = os.path.join(sample_dir, f"rollout_{rollout_idx}")
             else:
                 rollout_dir = sample_dir
             
             traj_path = os.path.join(rollout_dir, 'traj.jsonl')
-            if os.path.exists(traj_path):
+            if os.path.exists(traj_path) and traj_path not in seen_traj_paths:
                 traj_paths.append(traj_path)
+                seen_traj_paths.add(traj_path)
         
         # Summarize trajectories (unified function handles both single and multiple)
         if not traj_paths:
+            for root, _, filenames in os.walk(sample_dir):
+                if 'traj.jsonl' not in filenames:
+                    continue
+                traj_path = os.path.join(root, 'traj.jsonl')
+                if traj_path not in seen_traj_paths:
+                    traj_paths.append(traj_path)
+                    seen_traj_paths.add(traj_path)
+
+        if not traj_paths:
             result['error'] = "No trajectory files found"
-            print(f"  Warning: No trajectory files found for {question_id}")
+            print(f"  Warning: No trajectory files found for {question_id} under {sample_dir}")
             return result
         
         merged_summaries = summarize_rollouts(traj_paths, llm, sample_dir=sample_dir)
@@ -184,24 +272,9 @@ def generate_experience_for_sample(sample_info, args):
             used_experiences=used_experiences
         )
         
-        # Normalize operations
-        norm_ops = []
-        if isinstance(raw_ops, str):
-            try:
-                raw_ops = json.loads(raw_ops)
-            except Exception:
-                pass
-        
-        if isinstance(raw_ops, dict) and 'experiences' in raw_ops:
-            for _, v in raw_ops['experiences'].items():
-                if isinstance(v, str) and v.strip():
-                    norm_ops.append({"experience": v.strip()})
-        elif isinstance(raw_ops, list):
-            for o in raw_ops:
-                if isinstance(o, dict):
-                    exp_txt = o.get('experience') or o.get('exp')
-                    if isinstance(exp_txt, str) and exp_txt.strip():
-                        norm_ops.append({"experience": exp_txt.strip()})
+        norm_ops = _normalize_experience_updates(raw_ops)
+        if not norm_ops:
+            print(f"  Warning: No normalized experience operations for {question_id}")
         
         # Save experiences to sample directory
         if norm_ops:
@@ -337,6 +410,10 @@ def process_large_batch_experiences(samples_info, args, batch_idx=0, is_final=Fa
     
     gen_time = time.time() - gen_start
     print(f"  [Timing] Experience generation: {gen_time:.1f}s")
+    print(
+        f"  [Experience Ops] successful_samples={successful_samples}/{len(samples_info)}, "
+        f"ops={len(all_experience_ops)}, skills={len(all_skill_contents)}"
+    )
     
     if all_experience_ops and getattr(args, 'experience_library_update', False) and args.experience_library:
         try:
@@ -369,6 +446,8 @@ def process_large_batch_experiences(samples_info, args, batch_idx=0, is_final=Fa
                 print(f"  [Timing] Experience merge: {merge_time:.1f}s")
         except Exception as e:
             print(f"  Warning: Failed to merge experiences into library: {e}")
+    elif getattr(args, 'experience_library_update', False) and args.experience_library:
+        print("  Warning: No experience operations were produced; experience library was not updated")
             
     # Merge all skills into library (single merge operation)
     if all_skill_contents and getattr(args, 'skill_library', None):
@@ -424,6 +503,11 @@ def main(args):
     
     print(f"Starting API-based greedy inference...")
     print(f"Reasoning model: {args.model_name}")
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    os.environ["XSKILL_OUTPUT_DIR"] = args.output_dir
+    os.environ.setdefault("XSKILL_API_TIMING_PATH", os.path.join(args.output_dir, "api_timings.jsonl"))
+    print(f"API timing log: {os.environ['XSKILL_API_TIMING_PATH']}")
     
     # Validate and set experience batch parameters
     if getattr(args, 'experience_online_generate', False):
@@ -635,6 +719,9 @@ def main(args):
                 for actual_sample_idx in batch_indices:
                     if actual_sample_idx in batch_sample_results:
                         sample_info = batch_sample_results[actual_sample_idx]
+                        if not sample_info['results']:
+                            print(f"  [Large Batch] Skipping {sample_info['question_id']} for experience generation: no successful rollouts")
+                            continue
                         sample_info_dict = {
                             'sample': sample_info['sample'],
                             'sample_idx': actual_sample_idx,

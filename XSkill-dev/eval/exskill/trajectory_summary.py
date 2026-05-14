@@ -20,7 +20,18 @@ from .multimodal_analysis import generate_image_captions
 MAX_RETRIES = 3
 
 # Token configuration
-MAX_TOKENS = 12288  # Max tokens for trajectory summarization
+MAX_TOKENS = int(
+    os.environ.get(
+        "EXPERIENCE_SUMMARY_MAX_TOKENS",
+        os.environ.get("EXPERIENCE_MAX_COMPLETION_TOKENS", "2048"),
+    )
+)
+MAX_SUMMARY_IMAGES = int(
+    os.environ.get(
+        "EXPERIENCE_MAX_SUMMARY_IMAGES",
+        os.environ.get("EXPERIENCE_MAX_IMAGES", "4"),
+    )
+)
 
 
 # --------- Summarization ---------
@@ -535,6 +546,8 @@ def summarize_rollouts(traj_paths: Union[str, List[str]], llm: ExperienceLLM, sa
         for caption_key, image_info in all_images.items():
             if image_info["is_original"] and image_info["rollout_dir"] == "":
                 question_images.append(image_info["file_path"])
+    if MAX_SUMMARY_IMAGES >= 0:
+        question_images = question_images[:MAX_SUMMARY_IMAGES]
     
     # Call LLM with retry mechanism (with images if available)
     response_text = None

@@ -7,10 +7,12 @@ import os
 import re
 import json
 import shutil
+import time
 from PIL import Image
 from utils.context_utils import process_image
 from utils.context_utils import pil_to_base64_data_uri, estimate_tokens
 from utils.result_utils import save_trajectory
+from utils.api_router import record_api_timing
 from qwen_vl_utils import fetch_image # type: ignore
 
 # Import tool support
@@ -358,6 +360,8 @@ class APIToolHandler:
                     'error': True
                 }
         
+        tool_start = time.time()
+        tool_timing_recorded = False
         try:
             # Get or create tool instance
             tool = self.get_or_create_tool(tool_name)
@@ -370,6 +374,13 @@ class APIToolHandler:
             tool_kwargs = self.prepare_tool_kwargs(tool_name, node)
             
             tool_result = tool.call(parameters, **tool_kwargs)
+            record_api_timing(
+                kind=f"tool:{tool_name}",
+                endpoint=tool_name,
+                latency=time.time() - tool_start,
+                status_code=200,
+            )
+            tool_timing_recorded = True
             
             # Save tool call to trajectory
             if self.save_dir:
@@ -480,6 +491,13 @@ class APIToolHandler:
             }
             
         except Exception as e:
+            if not tool_timing_recorded:
+                record_api_timing(
+                    kind=f"tool:{tool_name}",
+                    endpoint=tool_name,
+                    latency=time.time() - tool_start,
+                    error_type=type(e).__name__,
+                )
             error_msg = f"Error executing tool '{tool_name}': {str(e)}"
             print(f"[Tool Error] {error_msg}")
             

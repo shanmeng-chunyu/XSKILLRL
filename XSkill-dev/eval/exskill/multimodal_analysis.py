@@ -10,7 +10,8 @@ from .llm_client import ExperienceLLM
 # --------- Constants ---------
 
 # Token configuration
-MAX_TOKENS = 2048  # Max tokens for image caption generation
+MAX_TOKENS = int(os.environ.get("EXPERIENCE_IMAGE_CAPTION_MAX_TOKENS", "1024"))
+MAX_IMAGES_PER_REQUEST = int(os.environ.get("EXPERIENCE_MAX_IMAGES", "4"))
 
 # Concurrency configuration
 MAX_WORKERS = 8  # Maximum number of concurrent workers for image caption generation
@@ -94,7 +95,8 @@ def _generate_single_image_caption(
         
         if original_image_paths:
             # Load original images
-            for orig_path in original_image_paths:
+            remaining_images = max(0, MAX_IMAGES_PER_REQUEST - len(images_to_send))
+            for orig_path in original_image_paths[:remaining_images]:
                 if orig_path.exists():
                     try:
                         orig_img = Image.open(orig_path).convert('RGB')

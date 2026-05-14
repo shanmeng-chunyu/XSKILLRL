@@ -37,8 +37,9 @@ TOP_K_RETRIEVE = 3  # Default number of top experiences to retrieve
 MIN_SIMILARITY = 0.0  # Minimum similarity threshold for retrieval
 
 # Token configuration
-MAX_TOKENS_TASK_DECOMPOSITION = 2048  # Max tokens for task decomposition
-MAX_TOKENS_REWRITE = 8192  # Max tokens for experience rewrite
+MAX_TOKENS_TASK_DECOMPOSITION = int(os.environ.get("EXPERIENCE_DECOMPOSITION_MAX_TOKENS", "1024"))
+MAX_TOKENS_REWRITE = int(os.environ.get("EXPERIENCE_REWRITE_MAX_TOKENS", "2048"))
+MAX_MULTIMODAL_IMAGES = int(os.environ.get("EXPERIENCE_MAX_IMAGES", "4"))
 
 # Temperature configuration
 TEMPERATURE_TASK_DECOMPOSITION = 0.3  # Temperature for task decomposition
@@ -55,7 +56,7 @@ def _build_multimodal_user_content(prompt: str, images: List[Any]) -> List[dict]
     from PIL import Image
     from utils.context_utils import pil_to_base64_data_uri
     content = [{"type": "text", "text": prompt}]
-    for img in images:
+    for img in images[:MAX_MULTIMODAL_IMAGES]:
         if isinstance(img, Image.Image):
             content.append({
                 "type": "image_url",
@@ -587,6 +588,12 @@ class ExperienceRetriever:
         
         # print(f"  Experience retriever updated: {len(self.experiences)} total experiences, {len(self._experience_embeddings)} embedded")
     
+    def ensure_embeddings_ready(self) -> None:
+        """Regenerate embeddings when experiences exist but the in-memory index is empty."""
+        if self.experiences and not self._experience_embeddings:
+            print(f"  [Retrieval] Rebuilding embeddings for {len(self.experiences)} experiences...")
+            self._load_or_generate_embeddings()
+
     def get_last_retrieval_info(self) -> Optional[Dict[str, Any]]:
         """
         Get information about the last retrieval operation.
@@ -635,8 +642,10 @@ class ExperienceRetriever:
             "total_unique_experiences": 0
         }
         if not self._experience_embeddings:
-            logger.warning("No experience embeddings available, returning empty result")
-            return {}, empty_info
+            self.ensure_embeddings_ready()
+            if not self._experience_embeddings:
+                logger.warning("No experience embeddings available, returning empty result")
+                return {}, empty_info
 
         # Generate query embedding
         query_embedding = self._generate_embedding(query)
@@ -649,8 +658,9 @@ class ExperienceRetriever:
         exp_matrix = np.vstack([self._experience_embeddings[eid] for eid in exp_ids])
         q = query_embedding.reshape(1, -1)
         sim_scores = cosine_similarity(q, exp_matrix)[0]
-        similarities = [(exp_ids[i], float(sim_scores[i])) for i in range(len(exp_ids)) if sim_scores[i] >= min_similarity]
-        similarities.sort(key=lambda x: x[1], reverse=True)
+        all_similarities = [(exp_ids[i], float(sim_scores[i])) for i in range(len(exp_ids))]
+        all_similarities.sort(key=lambda x: x[1], reverse=True)
+        similarities = [(eid, score) for eid, score in all_similarities if score >= min_similarity]
         
         # Get top-k
         top_similarities = similarities[:top_k]
@@ -676,10 +686,23 @@ class ExperienceRetriever:
         if not self._last_retrieval_info or not self._last_retrieval_info.get("decomposition_used", False):
             self._last_retrieval_info = retrieval_info.copy()
         
+        retrieval_info["top_similarity_scores"] = [
+            {"experience_id": eid, "score": round(score, 4)}
+            for eid, score in all_similarities[: min(5, len(all_similarities))]
+        ]
+        retrieval_info["min_similarity"] = min_similarity
+        retrieval_info["embedded_count"] = len(self._experience_embeddings)
+
         if result:
             logger.debug(
                 f"Retrieved {len(result)} experiences for query "
                 f"(similarities: {[f'{s:.3f}' for _, s in top_similarities[:3]]}...)"
+            )
+        else:
+            top_diag = ", ".join(f"{eid}:{score:.3f}" for eid, score in all_similarities[:3])
+            print(
+                f"  [Retrieval] 0 hits from {len(self._experience_embeddings)} embeddings "
+                f"(min_similarity={min_similarity}, top={top_diag or 'none'})"
             )
         
         return result, retrieval_info

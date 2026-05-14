@@ -7,6 +7,7 @@ import time
 import random
 import json
 import requests
+from utils.api_router import RETRYABLE_STATUS_CODES, collect_endpoint_specs, routed_post_once
 
 # Error code classification: non-retryable (do not retry on these)
 NON_RETRYABLE_STATUS_CODES = {400, 401, 403, 404}
@@ -221,6 +222,61 @@ def _parse_api_response(response, api_name: str, attempt: int = 0, max_attempts:
 
 # ====================== call vision api ==============================================
 
+def _get_reasoning_endpoint_specs():
+    specs = collect_endpoint_specs(
+        plural_env="REASONING_END_POINTS",
+        singular_env="REASONING_END_POINT",
+        api_key_env="REASONING_API_KEY",
+        fallback_pairs=[("REASONING_END_POINT_2", "REASONING_API_KEY_2")],
+        default_api_key=os.environ.get("REASONING_API_KEY") or "EMPTY",
+        require_chat_completions=True,
+    )
+    if not specs:
+        raise ValueError("REASONING_END_POINTS or REASONING_END_POINT must be set.")
+    return specs
+
+
+def _try_endpoint_pool(model_name: str, messages: list, sampling_params: dict, max_retries: int, tools: list = None):
+    specs = _get_reasoning_endpoint_specs()
+    attempts = max(max_retries, len(specs))
+
+    for attempt in range(attempts):
+        def payload_factory(spec):
+            payload = _build_payload(model_name, messages, sampling_params, tools)
+            _add_reasoning_param(payload, model_name, spec.endpoint)
+            return payload
+
+        response, request_error, spec = routed_post_once(
+            specs=specs,
+            payload_factory=payload_factory,
+            timeout=API_TIMEOUT,
+            request_kind="reasoning",
+            api_name="Reasoning API",
+            retry_count=attempt,
+        )
+
+        if request_error and response is None:
+            continue
+        if response is None:
+            continue
+        if response.status_code in RETRYABLE_STATUS_CODES and attempt < attempts - 1:
+            continue
+
+        result, _, error_type = _parse_api_response(
+            response, f"Reasoning API {spec.endpoint}", attempt=attempt, max_attempts=attempts
+        )
+        if result is not None:
+            return result
+
+        if error_type == "empty_choices":
+            return None
+        if error_type == "http_error" and response.status_code in NON_RETRYABLE_STATUS_CODES:
+            return None
+        if attempt < attempts - 1:
+            time.sleep(BASE_WAIT_TIME)
+
+    return None
+
 def _try_single_attempt(api_key: str, end_point: str, model_name: str, messages: list, 
                         sampling_params: dict, api_name: str = "API", tools: list = None):
     """
@@ -359,88 +415,17 @@ def _try_single_api(api_key: str, end_point: str, model_name: str, messages: lis
 
 def call_vision_api(model_name: str, messages: list, sampling_params: dict, max_retries: int = None, tools: list = None):
     """
-    Call the vision API with robust retry logic, including exponential backoff for rate limiting.
-    Supports round-robin polling between primary and fallback APIs for faster response.
-    
-    Args:
-        model_name: Name of the model to use
-        messages: List of message dictionaries
-        sampling_params: Dictionary containing temperature, top_p, max_tokens
-        max_retries: Maximum number of retry attempts (shared between both APIs in round-robin)
-        tools: Optional list of tool declarations for function calling (Gemini format)
-        
-    Returns:
-        Model response (string or dict with tool_calls), or None on failure
+    Call the vision API through the shared endpoint pool.
+
+    REASONING_END_POINTS enables normal load balancing across replicas. The
+    legacy REASONING_END_POINT and REASONING_END_POINT_2 variables remain
+    supported, but they are treated as peers instead of primary/fallback.
     """
-    # Use default retry count (if not specified)
     if max_retries is None:
         max_retries = DEFAULT_MAX_RETRIES
-    
-    # Get primary API configuration
-    api_key_1 = os.environ.get("REASONING_API_KEY")
-    end_point_1 = os.environ.get("REASONING_END_POINT")
 
-    if not all([api_key_1, end_point_1]):
-        raise ValueError("REASONING_API_KEY and REASONING_END_POINT must be set.")
-
-    # Get fallback API configuration (optional)
-    api_key_2 = os.environ.get("REASONING_API_KEY_2")
-    end_point_2 = os.environ.get("REASONING_END_POINT_2")
-    
-    has_fallback = bool(api_key_2 and end_point_2)
-    
-    # Round-Robin polling: alternate between primary and fallback APIs
-    if has_fallback:
-        print(f"[API Round-Robin] Starting round-robin polling with {max_retries} total attempts (shared between both APIs)")
-        consecutive_429_count = 0  # Track consecutive rounds where both APIs return 429 errors
-        all_errors = []  # Collect all error information
-        
-        for attempt in range(max_retries):
-            # Try primary API first in each Round-Robin
-            result_1, is_429_1, error_1 = _try_single_attempt(api_key_1, end_point_1, model_name, messages, 
-                                                     sampling_params, api_name="Primary API", tools=tools)
-            if result_1 is not None:
-                return result_1
-            if error_1:
-                all_errors.append(f"Round {attempt + 1}: {error_1}")
-            
-            # Try fallback API in each Round-Robin
-            result_2, is_429_2, error_2 = _try_single_attempt(api_key_2, end_point_2, model_name, messages, 
-                                                     sampling_params, api_name="Fallback API", tools=tools)
-            if result_2 is not None:
-                return result_2
-            if error_2:
-                all_errors.append(f"Round {attempt + 1}: {error_2}")
-            
-            # Both failed - check if both returned 429 errors
-            if is_429_1 and is_429_2:
-                consecutive_429_count += 1
-                # If both APIs are rate-limited, wait longer before next round
-                # Exponential backoff: 20s, 30s, 40s, max 60s
-                extra_wait = min( consecutive_429_count * 5, 15)
-                print(f"[API Round-Robin] Both APIs rate-limited (429), waiting {extra_wait} seconds before next round")
-                if attempt < max_retries - 1:
-                    time.sleep(extra_wait)
-            else:
-                # Reset counter if not both 429
-                consecutive_429_count = 0
-                # Normal wait between rounds
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-        
-        # Build detailed error message
-        error_summary = "All API attempts failed (both primary and fallback)"
-        if all_errors:
-            error_summary += f". Errors: {'; '.join(all_errors)}"
-        print(f"[API Round-Robin] {error_summary}")
-        return f"Error: {error_summary}"
-    else:
-        # No fallback API, use original retry logic with primary API only
-        print(f"[API] No fallback API configured, using primary API with {max_retries} retries")
-        result = _try_single_api(api_key_1, end_point_1, model_name, messages, sampling_params, 
-                                max_retries, api_name="Primary API", tools=tools)
-        if result is not None:
-            return result
-        else:
-            print(f"[API] Primary API failed after {max_retries} attempts")
-            return "Error: All API attempts failed (primary API only)"
+    result = _try_endpoint_pool(model_name, messages, sampling_params, max_retries, tools=tools)
+    if result is not None:
+        return result
+    print(f"[API] All reasoning endpoint attempts failed after {max_retries} retries")
+    return "Error: All API attempts failed"

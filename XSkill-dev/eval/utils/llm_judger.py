@@ -8,10 +8,10 @@ answers against ground truth using configurable prompts.
 import re
 import os
 import time
-import openai
 from typing import Tuple, List, Optional, Dict
 
 from prompts.llm_as_judge_prompts import SYSTEM_PROMPT, QUERY_PROMPT
+from utils.api_router import RETRYABLE_STATUS_CODES, collect_endpoint_specs, routed_post_once
 
 
 # Global client instance (lazily initialized)
@@ -31,19 +31,31 @@ class LLMJudgeClient:
 
     def __init__(self):
         """Initialize the LLM judge client with environment variables."""
-        api_key = os.environ.get("VERIFIER_API_KEY")
-        endpoint = os.environ.get("VERIFIER_END_POINT")
         self.model_name = os.environ.get("VERIFIER_MODEL_NAME", "gpt-4o-2024-11-20")
-        
-        if not api_key or not endpoint:
-            raise ValueError(
-                "VERIFIER_API_KEY and VERIFIER_END_POINT must be set in environment variables"
-            )
-        
-        self.client = openai.OpenAI(
-            base_url=endpoint,
-            api_key=api_key,
+
+        default_key = os.environ.get("REASONING_API_KEY") or "EMPTY"
+        self.endpoint_specs = collect_endpoint_specs(
+            plural_env="VERIFIER_END_POINTS",
+            singular_env="VERIFIER_END_POINT",
+            api_key_env="VERIFIER_API_KEY",
+            fallback_pairs=[("VERIFIER_END_POINT_2", "VERIFIER_API_KEY_2")],
+            default_api_key=default_key,
+            require_chat_completions=True,
         )
+        if not self.endpoint_specs:
+            self.endpoint_specs = collect_endpoint_specs(
+                plural_env="REASONING_END_POINTS",
+                singular_env="REASONING_END_POINT",
+                api_key_env="REASONING_API_KEY",
+                fallback_pairs=[("REASONING_END_POINT_2", "REASONING_API_KEY_2")],
+                default_api_key=default_key,
+                require_chat_completions=True,
+            )
+
+        if not self.endpoint_specs:
+            raise ValueError(
+                "VERIFIER_END_POINTS/END_POINT or REASONING_END_POINTS/END_POINT must be set in environment variables"
+            )
 
     def evaluate(
         self, 
@@ -77,38 +89,50 @@ class LLMJudgeClient:
             "content": [{"type": "text", "text": prompt}],
         })
 
-        for attempt in range(max_retries):
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model_name,
-                    messages=messages,
-                    temperature=min(0.2 * attempt, 1.0),
-                    max_tokens=8192,
-                    timeout=120,
-                )
+        attempts = max(max_retries, len(self.endpoint_specs))
+        for attempt in range(attempts):
+            def payload_factory(spec):
+                return {
+                    "model": self.model_name,
+                    "messages": messages,
+                    "temperature": min(0.2 * attempt, 1.0),
+                    "max_tokens": 8192,
+                }
 
-                # Validate response structure
-                if not response or not hasattr(response, 'choices') or not response.choices:
-                    raise ValueError("Invalid response: missing choices field")
-                
-                if len(response.choices) == 0:
+            response, request_error, spec = routed_post_once(
+                specs=self.endpoint_specs,
+                payload_factory=payload_factory,
+                timeout=120,
+                request_kind="verifier",
+                api_name="Verifier API",
+                retry_count=attempt,
+            )
+
+            if request_error and response is None:
+                continue
+            if response is None:
+                continue
+            if response.status_code in RETRYABLE_STATUS_CODES and attempt < attempts - 1:
+                continue
+            if response.status_code != 200:
+                print(f"[Verifier API] HTTP {response.status_code} from {spec.endpoint}: {response.text[:300]}")
+                if attempt < attempts - 1:
+                    delay = min(2 ** attempt, 10)
+                    time.sleep(delay)
+                continue
+
+            try:
+                payload = response.json()
+                choices = payload.get("choices", [])
+                if not choices:
                     raise ValueError("Invalid response: empty choices array")
-                
-                first_choice = response.choices[0]
-                if not first_choice or not hasattr(first_choice, 'message'):
-                    raise ValueError("Invalid response: missing message in choices[0]")
-                
-                message = first_choice.message
-                if not message or not hasattr(message, 'content'):
-                    raise ValueError("Invalid response: missing content in message")
-                
-                response_text = message.content
+                message = choices[0].get("message", {})
+                response_text = message.get("content", "")
                 if not response_text:
                     raise ValueError("Invalid response: empty content")
-                
-                # Extract score from response
+
                 if 'score:' not in response_text.lower():
-                    raise ValueError(f"No 'score:' found in response")
+                    raise ValueError("No 'score:' found in response")
 
                 score_str = (
                     response_text.lower()
@@ -118,29 +142,15 @@ class LLMJudgeClient:
                     .strip()
                     .split(" ")[0]
                 )
-                
+
                 if "1" not in score_str and '0' not in score_str:
                     raise ValueError(f"No valid score ('0' or '1') found: {score_str}")
 
                 return score_str, response_text
-                
-            except openai.RateLimitError as e:
-                print(f"[RateLimitError] Attempt {attempt + 1}/{max_retries}: {str(e)}")
-                time.sleep(min(3 * (attempt + 1), 10))
-                continue
-                
-            except (openai.APIError, openai.APIConnectionError, openai.APITimeoutError) as e:
-                error_code = getattr(e, 'status_code', None) or getattr(e, 'code', None)
-                print(f"[APIError] Attempt {attempt + 1}/{max_retries}: {str(e)} (code: {error_code})")
-                if attempt < max_retries - 1:
-                    delay = min(2 ** attempt, 10)
-                    time.sleep(delay)
-                continue
-                
             except Exception as e:
                 print("=" * 100)
-                print(f"[Error] Attempt {attempt + 1}/{max_retries}: {str(e)}")
-                if attempt < max_retries - 1:
+                print(f"[Error] Attempt {attempt + 1}/{attempts}: {str(e)}")
+                if attempt < attempts - 1:
                     print(f"Messages length: {len(str(messages))}")
                     print("=" * 100)
                     delay = min(2 ** attempt, 10)

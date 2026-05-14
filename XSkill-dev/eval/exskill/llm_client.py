@@ -6,6 +6,7 @@ from typing import Optional, Dict, List, Union, Any
 from PIL import Image
 
 from .experience_utils import image_to_base64
+from utils.api_router import RETRYABLE_STATUS_CODES, collect_endpoint_specs, routed_post_once
 
 
 # --------- Constants ---------
@@ -18,7 +19,7 @@ API_TIMEOUT = 300  # Timeout for general API requests (seconds)
 API_TIMEOUT_IMAGE = 300  # Timeout for multimodal API requests (seconds)
 
 # Token configuration
-MAX_TOKENS_DEFAULT = 12288  # Default max tokens for LLM calls
+MAX_TOKENS_DEFAULT = int(os.environ.get("EXPERIENCE_MAX_COMPLETION_TOKENS", "2048"))
 
 
 class ExperienceLLM:
@@ -244,53 +245,91 @@ class ExperienceLLM:
             ValueError: If primary API not configured
         """
         max_retries = MAX_RETRIES
-        
-        # Get API configuration
-        api_key_1, end_point_1, api_key_2, end_point_2 = self._get_api_config(
-            "EXPERIENCE_API_KEY", "EXPERIENCE_END_POINT",
-            "EXPERIENCE_API_KEY_2", "EXPERIENCE_END_POINT_2"
+        default_key = os.environ.get("REASONING_API_KEY") or "EMPTY"
+        specs = collect_endpoint_specs(
+            plural_env="EXPERIENCE_END_POINTS",
+            singular_env="EXPERIENCE_END_POINT",
+            api_key_env="EXPERIENCE_API_KEY",
+            fallback_pairs=[("EXPERIENCE_END_POINT_2", "EXPERIENCE_API_KEY_2")],
+            default_api_key=default_key,
+            require_chat_completions=True,
         )
-        
-        if not api_key_1 or not end_point_1:
+        if not specs:
+            specs = collect_endpoint_specs(
+                plural_env="REASONING_END_POINTS",
+                singular_env="REASONING_END_POINT",
+                api_key_env="REASONING_API_KEY",
+                fallback_pairs=[("REASONING_END_POINT_2", "REASONING_API_KEY_2")],
+                default_api_key=default_key,
+                require_chat_completions=True,
+            )
+
+        if not specs:
             if return_placeholder_on_error:
                 return "[API not configured]"
-            raise ValueError("EXPERIENCE_API_KEY/END_POINT or REASONING_API_KEY/END_POINT must be set")
-        
-        # Normalize primary endpoint
-        end_point_1 = self._normalize_endpoint(end_point_1, require_chat_completions)
-        
-        # Try primary API
-        try:
-            return self._try_single_experience_api(
-                api_key_1, end_point_1, user_content, max_tokens,
-                temperature, top_p, max_retries,
-                api_name=primary_api_name,
-                system_prompt=system_prompt,
+            raise ValueError("EXPERIENCE_END_POINTS/END_POINT or REASONING_END_POINTS/END_POINT must be set")
+
+        if system_prompt is None:
+            system_prompt = "You are an expert at summarizing visual reasoning trajectories and extracting generalizable experiences."
+
+        attempts = max(max_retries, len(specs))
+        last_error = "all attempts failed"
+        for attempt in range(attempts):
+            def payload_factory(spec):
+                return {
+                    "model": self.model_name,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "max_tokens": max_tokens,
+                }
+
+            response, request_error, spec = routed_post_once(
+                specs=specs,
+                payload_factory=payload_factory,
                 timeout=timeout,
-                return_placeholder_on_error=return_placeholder_on_error
+                request_kind="experience",
+                api_name=primary_api_name,
+                retry_count=attempt,
             )
-        except RuntimeError as e:
-            # Primary API failed, try fallback if configured
-            if api_key_2 and end_point_2:
-                end_point_2 = self._normalize_endpoint(end_point_2, require_chat_completions)
-                print(f"[API Fallback] {primary_api_name} failed, switching to {fallback_api_name}...")
+
+            if request_error and response is None:
+                last_error = request_error
+                continue
+            if response is None:
+                last_error = "no response"
+                continue
+            if response.status_code in RETRYABLE_STATUS_CODES and attempt < attempts - 1:
+                last_error = f"HTTP {response.status_code}"
+                continue
+            if response.status_code != 200:
                 try:
-                    return self._try_single_experience_api(
-                        api_key_2, end_point_2, user_content, max_tokens,
-                        temperature, top_p, max_retries,
-                        api_name=fallback_api_name,
-                        system_prompt=system_prompt,
-                        timeout=timeout,
-                        return_placeholder_on_error=return_placeholder_on_error
-                    )
-                except RuntimeError as e2:
-                    if return_placeholder_on_error:
-                        return f"[Failed: both APIs failed]"
-                    raise RuntimeError(f"Both {primary_api_name} and {fallback_api_name} failed. Primary: {e}. Fallback: {e2}")
-            else:
-                if return_placeholder_on_error:
-                    return f"[Failed: {str(e)}]"
-                raise RuntimeError(f"{primary_api_name} failed and no fallback configured: {e}")
+                    detail = response.json()
+                except Exception:
+                    detail = response.text
+                last_error = f"HTTP {response.status_code}: {detail}"
+                print(f"[{primary_api_name}] Experience API error from {spec.endpoint}: {last_error}")
+                if attempt < attempts - 1:
+                    continue
+                break
+
+            try:
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                if content:
+                    return content
+                last_error = "empty response"
+                print(f"[{primary_api_name}] API returned empty content on attempt {attempt + 1}/{attempts}")
+            except Exception as exc:
+                last_error = str(exc)
+                print(f"[{primary_api_name}] Failed to parse response from {spec.endpoint}: {exc}")
+
+        if return_placeholder_on_error:
+            return f"[Failed: {last_error}]"
+        raise RuntimeError(f"{primary_api_name} failed across endpoint pool: {last_error}")
 
     def chat_with_image(
         self, 

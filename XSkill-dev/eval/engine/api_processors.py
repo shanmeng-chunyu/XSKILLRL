@@ -18,6 +18,15 @@ from engine.api_model_caller import create_model_caller
 SYSTEM_PROMPT = ""
 
 
+def _resolve_image_source(image_folder, image_ref):
+    image_ref = str(image_ref)
+    if image_ref.startswith(("http://", "https://", "data:image/")):
+        return image_ref
+    if os.path.isabs(image_ref):
+        return image_ref
+    return os.path.join(image_folder, image_ref)
+
+
 def set_global_prompts(system_prompt):
     """
     Set global prompt variable for API processors.
@@ -79,7 +88,7 @@ def parse_and_load_multiple_images(sample, args, save_dir):
     user_content_list = []
     
     for i in range(num_images_to_load):
-        image_path = os.path.join(args.image_folder, image_paths[i])
+        image_path = _resolve_image_source(args.image_folder, image_paths[i])
         # Naming convention: first image is 'original_image', others are 'original_image_1', 'original_image_2', etc.
         image_name = f'original_image_{i}' if i > 0 else 'original_image'
         
@@ -128,8 +137,14 @@ def _initialize_sample_and_image(sample, args, save_dir):
         Returns None if image loading fails
     """
     question_id = sample.get("doc_id", sample.get("question_id", "N/A"))
+    question_id = str(question_id if question_id is not None else "N/A")
     question = sample.get('problem', sample.get('question', ''))
-    ground_truth = sample.get("solution")
+    ground_truth = (
+        sample.get("solution")
+        or sample.get("answer")
+        or sample.get("ground_truth")
+        or sample.get("label")
+    )
     
     # Save initial trajectory info
     initial_traj_info = {
@@ -230,7 +245,13 @@ def _evaluate_trajectory(question, ground_truth, conversation_history, assistant
     for message in conversation_history:
         trajectory_text += f"**{message['role']}**: {message['content']}\n\n"
     
-    if os.environ.get("VERIFIER_API_KEY") and os.environ.get("VERIFIER_END_POINT"):
+    has_verifier_endpoint = bool(
+        os.environ.get("VERIFIER_END_POINTS")
+        or os.environ.get("VERIFIER_END_POINT")
+        or os.environ.get("REASONING_END_POINTS")
+        or os.environ.get("REASONING_END_POINT")
+    )
+    if has_verifier_endpoint:
         if ground_truth:
             extra_info = {
                 "acc_reward_weight": 1.0,
@@ -251,9 +272,11 @@ def _evaluate_trajectory(question, ground_truth, conversation_history, assistant
                 accuracy_score = 0.0
                 trajectory_score = 0.0
                 trajectory_analysis = f"Evaluation failed: {str(e)}"
+        else:
+            trajectory_analysis = "Evaluation skipped: missing ground truth."
     else:
-        print("VERIFIER_API_KEY or VERIFIER_END_POINT not found in environment variables. Skipping evaluation.")
-        trajectory_analysis = "Evaluation skipped: VERIFIER_API_KEY or VERIFIER_END_POINT not configured."
+        print("VERIFIER endpoint not found in environment variables. Skipping evaluation.")
+        trajectory_analysis = "Evaluation skipped: verifier endpoint not configured."
     
     return accuracy_score, trajectory_score, trajectory_analysis, trajectory_text
 
@@ -274,6 +297,40 @@ def _build_result_dict(question_id, question, final_answer, ground_truth, conver
         "trajectory_score": trajectory_score,
         "trajectory_analysis": trajectory_analysis,
     }
+
+
+def _ensure_recoverable_trajectory(save_dir, result):
+    """Create a minimal traj.jsonl when a rollout returned but trajectory logging is missing."""
+    traj_path = os.path.join(save_dir, "traj.jsonl")
+    if os.path.exists(traj_path):
+        return
+
+    try:
+        save_trajectory(save_dir, {
+            "doc_id": result.get("question_id"),
+            "initial_prompt": result.get("prompt", ""),
+            "ground_truth": result.get("ground_truth"),
+            "recovered": True,
+        })
+        turn_idx = 0
+        for message in result.get("conversation_history", []):
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                continue
+            save_trajectory(save_dir, {
+                "turn_idx": turn_idx,
+                "text_output": message.get("content", ""),
+                "recovered": True,
+            })
+            turn_idx += 1
+        if turn_idx == 0:
+            save_trajectory(save_dir, {
+                "turn_idx": 0,
+                "text_output": result.get("final_answer", ""),
+                "recovered": True,
+            })
+        print(f"[Trajectory Recovery] Recreated missing traj.jsonl at {traj_path}")
+    except Exception as exc:
+        print(f"[Trajectory Recovery] Failed to recreate traj.jsonl at {traj_path}: {exc}")
 
 
 # ============================================================================
@@ -449,6 +506,7 @@ def process_single_sample(sample, args, sampling_params, rollout_idx=None):
         Result dictionary with trajectory information
     """
     question_id = sample.get("doc_id", sample.get("question_id", "N/A"))
+    question_id = str(question_id if question_id is not None else "N/A")
     
     # Determine save directory based on rollout mode
     rollouts_per_sample = getattr(args, 'rollouts_per_sample', 1)
@@ -471,11 +529,14 @@ def process_single_sample(sample, args, sampling_params, rollout_idx=None):
         final_result = _process_single_sample_unified(sample, args, sampling_params)
         
         if final_result:
+            _ensure_recoverable_trajectory(save_dir, final_result)
             # Save metrics to the rollout directory
             metrics = {
                 "accuracy_score": final_result["accuracy_score"],
                 "trajectory_score": final_result.get("trajectory_score"),
                 "trajectory_analysis": final_result.get("trajectory_analysis"),
+                "final_answer": final_result.get("final_answer"),
+                "ground_truth": final_result.get("ground_truth"),
             }
             with open(os.path.join(save_dir, 'metrics.json'), 'w', encoding='utf-8') as f:
                 json.dump(metrics, f, indent=4)

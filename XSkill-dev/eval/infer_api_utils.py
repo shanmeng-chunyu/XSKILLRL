@@ -293,8 +293,15 @@ def _load_images_for_retrieval(sample, args):
     
     for img_path in image_paths:
         try:
-            full_path = os.path.join(args.image_folder, img_path)
-            if not os.path.exists(full_path):
+            img_path = str(img_path)
+            if img_path.startswith(("http://", "https://", "data:image/")):
+                full_path = img_path
+            elif os.path.isabs(img_path):
+                full_path = img_path
+            else:
+                full_path = os.path.join(args.image_folder, img_path)
+
+            if not full_path.startswith(("http://", "https://", "data:image/")) and not os.path.exists(full_path):
                 print(f"  [Retrieval] Warning: Image file not found: {full_path}")
                 continue
             
@@ -708,7 +715,11 @@ def reload_experiences(args, base_system_prompt, experience_retriever=None):
             # Update retriever with new experiences (incremental update)
             print(f"  Updating experience retriever with {len(exps)} experiences...")
             experience_retriever.update_experiences(exps, incremental=True)
-            print(f"  Experience retriever updated successfully.")
+            stats = experience_retriever.get_embedding_stats()
+            print(
+                "  Experience retriever updated successfully "
+                f"(experiences={stats['total_experiences']}, embedded={stats['embedded_count']}, missing={stats['missing_count']})."
+            )
             return base_system_prompt
 
         # Traditional mode: inject all experiences into system prompt

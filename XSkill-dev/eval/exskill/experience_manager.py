@@ -240,8 +240,19 @@ def _process_add_with_merge(
     Returns:
         Tuple of (final_exp_id, was_merged)
     """
+    if not provider.experiences:
+        exp_id = f"E{next_id}"
+        provider.add_experience(exp_id, new_text)
+        return exp_id, False
+
     # Generate embedding for new text
-    new_emb = provider._embed_texts([new_text])
+    try:
+        new_emb = provider._embed_texts([new_text])
+    except Exception as exc:
+        print(f"  - Warning: embedding failed for new experience, adding without similarity merge: {exc}")
+        exp_id = f"E{next_id}"
+        provider.add_experience(exp_id, new_text)
+        return exp_id, False
     if new_emb.size == 0:
         # Embedding failed, just add it
         exp_id = f"E{next_id}"
@@ -255,7 +266,13 @@ def _process_add_with_merge(
         query_emb = new_emb
     
     # Search for similar experiences
-    candidates = provider._search_similar(query_emb, top_k=TOP_K_SIMILARITY_SEARCH, similarity_threshold=similarity_threshold)
+    try:
+        candidates = provider._search_similar(query_emb, top_k=TOP_K_SIMILARITY_SEARCH, similarity_threshold=similarity_threshold)
+    except Exception as exc:
+        print(f"  - Warning: similarity search failed, adding without merge: {exc}")
+        exp_id = f"E{next_id}"
+        provider.add_experience(exp_id, new_text)
+        return exp_id, False
     
     if not candidates:
         # No similar experiences, just add
@@ -341,7 +358,11 @@ def batch_merge(
     merge_count = 0
     
     for operation in updates:
-        option = operation.get("option", "add")
+        option = str(operation.get("option", "add")).strip().lower()
+        if option in ("new", "create", "insert", "addition", "execution_tip", "decision_rule", "tip", "rule"):
+            option = "add"
+        if option not in ("add", "modify"):
+            option = "add"
         experience = operation.get("experience", "").strip()
         
         if not experience:

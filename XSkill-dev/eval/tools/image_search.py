@@ -18,6 +18,7 @@ from PIL import Image
 
 from tools.base import BaseTool
 from tools.tool_registry import register_tool
+from utils.api_router import RETRYABLE_STATUS_CODES, EndpointSpec, collect_endpoint_specs, routed_post_once
 from utils.context_utils import pil_to_base64_data_uri
 
 
@@ -115,6 +116,7 @@ Image references for reverse search:
             or os.getenv("REASONING_END_POINT")
         )
         self.caption_endpoint = self._normalize_chat_endpoint(self.caption_endpoint)
+        self.caption_endpoint_specs = self._build_caption_endpoint_specs()
         self.caption_timeout = int(config.get("caption_timeout", 120))
 
         self.proxies = None
@@ -134,6 +136,28 @@ Image references for reverse search:
         if endpoint.endswith("/chat/completions"):
             return endpoint
         return f"{endpoint}/chat/completions"
+
+    def _build_caption_endpoint_specs(self) -> List[EndpointSpec]:
+        default_key = self.caption_api_key or os.getenv("REASONING_API_KEY") or "EMPTY"
+        specs = collect_endpoint_specs(
+            plural_env="IMAGE_SEARCH_CAPTION_ENDPOINTS",
+            singular_env="IMAGE_SEARCH_CAPTION_ENDPOINT",
+            api_key_env="IMAGE_SEARCH_CAPTION_API_KEY",
+            default_api_key=default_key,
+            require_chat_completions=True,
+        )
+        if not specs and self.caption_endpoint:
+            specs = [EndpointSpec(endpoint=self.caption_endpoint, api_key=default_key, name=self.caption_endpoint)]
+        if not specs:
+            specs = collect_endpoint_specs(
+                plural_env="REASONING_END_POINTS",
+                singular_env="REASONING_END_POINT",
+                api_key_env="REASONING_API_KEY",
+                fallback_pairs=[("REASONING_END_POINT_2", "REASONING_API_KEY_2")],
+                default_api_key=default_key,
+                require_chat_completions=True,
+            )
+        return specs
 
     def call(self, params, **kwargs):
         if isinstance(params, str):
@@ -243,7 +267,7 @@ Image references for reverse search:
         return None
 
     def _caption_image_for_search(self, image: Image.Image) -> Optional[str]:
-        if not self.caption_endpoint or not self.caption_model:
+        if not self.caption_endpoint_specs or not self.caption_model:
             print("[ImageSearch] Caption endpoint/model not configured")
             return None
 
@@ -267,26 +291,32 @@ Image references for reverse search:
             "top_p": 1.0,
             "max_tokens": 512,
         }
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.caption_api_key}",
-        }
-
-        try:
-            response = requests.post(
-                self.caption_endpoint,
-                headers=headers,
-                json=payload,
+        attempts = max(2, len(self.caption_endpoint_specs))
+        for attempt in range(attempts):
+            response, request_error, spec = routed_post_once(
+                specs=self.caption_endpoint_specs,
+                payload_factory=lambda _spec: payload,
                 timeout=self.caption_timeout,
+                request_kind="image_caption",
+                api_name="ImageSearch Caption API",
+                retry_count=attempt,
             )
-            response.raise_for_status()
-            data = response.json()
-            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-            content = str(content).strip()
-            return content or None
-        except Exception as exc:
-            print(f"[ImageSearch] Local VLM caption failed: {exc}")
-            return None
+            if request_error and response is None:
+                continue
+            if response is None:
+                continue
+            if response.status_code in RETRYABLE_STATUS_CODES and attempt < attempts - 1:
+                continue
+            try:
+                response.raise_for_status()
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                content = str(content).strip()
+                if content:
+                    return content
+            except Exception as exc:
+                print(f"[ImageSearch] Local VLM caption failed from {spec.endpoint}: {exc}")
+        return None
 
     def _bocha_image_search(self, query: str, *, max_results: int) -> str:
         search_query = self._make_image_query(query)
