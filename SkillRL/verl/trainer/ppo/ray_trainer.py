@@ -1142,6 +1142,8 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
 
+        return local_global_step_folder
+
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
             return 0
@@ -1224,6 +1226,20 @@ class RayPPOTrainer:
             config=OmegaConf.to_container(self.config, resolve=True),
         )
 
+        from verl.utils.experiment_recorder import SkillRLExperimentRecorder
+
+        experiment_recorder = SkillRLExperimentRecorder.from_config(
+            self.config,
+            train_size=len(self.train_dataset) if self.train_dataset is not None else None,
+            val_size=len(self.val_dataset) if self.val_dataset is not None else None,
+            total_training_steps=self.total_training_steps,
+        )
+        if experiment_recorder is not None:
+            import atexit
+
+            atexit.register(experiment_recorder.mark_interrupted_if_running)
+            print(f"[ExperimentRecorder] Writing run record to {experiment_recorder.record_path}")
+
         self.global_steps = 0
 
         # load checkpoint before doing anything
@@ -1236,7 +1252,11 @@ class RayPPOTrainer:
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
+            if experiment_recorder is not None:
+                experiment_recorder.log_validation(self.global_steps, val_metrics, stage="initial_validation")
             if self.config.trainer.get("val_only", False):
+                if experiment_recorder is not None:
+                    experiment_recorder.mark_status("completed", "val_only completed")
                 return
 
         # add tqdm
@@ -1476,10 +1496,14 @@ class RayPPOTrainer:
                             if is_last_step:
                                 last_val_metrics = val_metrics
                         metrics.update(val_metrics)
+                        if experiment_recorder is not None:
+                            experiment_recorder.log_validation(self.global_steps, val_metrics, stage="validation")
 
                     if self.config.trainer.save_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.save_freq == 0):
                         with _timer("save_checkpoint", timing_raw):
-                            self._save_checkpoint()
+                            checkpoint_path = self._save_checkpoint()
+                        if experiment_recorder is not None:
+                            experiment_recorder.log_checkpoint(self.global_steps, checkpoint_path)
 
                 # training metrics
                 metrics.update(
@@ -1497,10 +1521,14 @@ class RayPPOTrainer:
 
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
+                if experiment_recorder is not None:
+                    experiment_recorder.log_step(self.global_steps, epoch, metrics)
 
                 progress_bar.update(1)
                 self.global_steps += 1
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
+                    if experiment_recorder is not None:
+                        experiment_recorder.mark_status("completed", "training completed")
                     return

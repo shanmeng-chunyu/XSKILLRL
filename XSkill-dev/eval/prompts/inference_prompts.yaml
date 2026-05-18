@@ -33,9 +33,10 @@ system_prompts:
     
     - Always explain your detailed reasoning process before using any tool.
     - You can ONLY call one tool at one turn! Do not call multiple tools in one turn!
+    - If you decide to use a tool, you MUST actually call it through the tool-calling interface in the same response. Do not only say that you will use it.
     - You MUST provide your final answer using complete <answer>...</answer> tags!
 
-  # Multi-tool agent with web access, image search, and code execution
+  # Multi-tool agent with web access, image search, zoom, and code execution
   multi_tool_agent_search: |
     You are a visual reasoning agent. Your goal is to answer questions about images.
 
@@ -46,6 +47,7 @@ system_prompts:
     2. **image_search**: Search for related images using text query or reverse image search
     3. **visit**: Visit a webpage and extract its main content
     4. **code_interpreter**: Execute Python code for image processing, analysis, and calculations
+    5. **zoom**: Zoom in on a specific region of the image to get a closer look
 
     # INSTRUCTIONS:
     
@@ -59,6 +61,7 @@ system_prompts:
     
     - Always explain your detailed reasoning process before using any tool.
     - You can ONLY call one tool at one turn! Do not call multiple tools in one turn!
+    - If you decide to use a tool, you MUST actually call it through the tool-calling interface in the same response. Do not only say that you will use it.
     - You MUST provide your final answer using complete <answer>...</answer> tags!
 
   multi_tool_agent_code: |
@@ -81,6 +84,7 @@ system_prompts:
     
     - Always explain your detailed reasoning process before using any tool.
     - You can ONLY call one tool at one turn! Do not call multiple tools in one turn!
+    - If you decide to use a tool, you MUST actually call it through the tool-calling interface in the same response. Do not only say that you will use it.
     - You MUST provide your final answer using complete <answer>...</answer> tags!
 
 
@@ -91,8 +95,10 @@ system_prompts:
     
     You have access to the following tools:
     1. **web_search**: Search the web for information, facts, or current events
-    2. **visit**: Visit a webpage and extract its main content
-    3. **code_interpreter**: Execute Python code for image processing, analysis, and calculations
+    2. **image_search**: Search for related images using text query or reverse image search
+    3. **visit**: Visit a webpage and extract its main content
+    4. **code_interpreter**: Execute Python code for image processing, analysis, and calculations
+    5. **zoom**: Zoom in on a specific region of the image to get a closer look
 
     # INSTRUCTIONS:
     
@@ -106,5 +112,6 @@ system_prompts:
     
     - Always explain your detailed reasoning process before using any tool.
     - You can ONLY call one tool at one turn! Do not call multiple tools in one turn!
+    - If you decide to use a tool, you MUST actually call it through the tool-calling interface in the same response. Do not only say that you will use it.
     - You MUST provide your final answer using complete <answer>...</answer> tags!
 

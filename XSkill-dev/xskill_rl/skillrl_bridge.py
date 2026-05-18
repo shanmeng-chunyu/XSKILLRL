@@ -150,9 +150,15 @@ class XSkillVisualQAEnvironment:
             data_files = _cfg_get(self.config.data, "val_files", data_files)
         samples = []
         for record in _iter_records_from_files(data_files):
-            item = record.get("env_kwargs") or {}
-            if not item and isinstance(record.get("extra_info"), dict):
-                item = record["extra_info"].get("sample") or {}
+            item = _first_present(record, "env_kwargs")
+            if not isinstance(item, dict):
+                item = {}
+            if not item:
+                extra_info = _first_present(record, "extra_info")
+                if isinstance(extra_info, dict):
+                    sample = _first_present(extra_info, "sample")
+                    if isinstance(sample, dict):
+                        item = sample
             if item:
                 samples.append(self._normalize_item(item))
         return samples
@@ -168,7 +174,7 @@ class XSkillVisualQAEnvironment:
         payload.setdefault("benchmark_name", payload.get("data_source", "xskill"))
         payload.setdefault("problem", payload.get("question", ""))
         payload.setdefault("solution", payload.get("answer", ""))
-        payload.setdefault("images", _as_list(payload.get("images") or payload.get("image") or payload.get("img")))
+        payload.setdefault("images", _as_list(_first_present(payload, "images", "image", "img")))
         return payload
 
     def _prompt_text(self, item: Dict[str, Any]) -> str:
@@ -294,6 +300,19 @@ def _as_list(value) -> List[Any]:
     if isinstance(value, np.ndarray):
         return value.tolist()
     return [value]
+
+
+def _first_present(container: Dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key not in container:
+            continue
+        value = container[key]
+        if value is None:
+            continue
+        if isinstance(value, float) and np.isnan(value):
+            continue
+        return value
+    return None
 
 
 def _extract_answer(response: str) -> str:

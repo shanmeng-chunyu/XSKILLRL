@@ -71,6 +71,7 @@ WEB_SEARCH_MAX_CALLS=7
 # ============================================================================
 
 MAX_TOTAL_TOKENS=32768
+MAX_COMPLETION_TOKENS="${MAX_COMPLETION_TOKENS:-8192}"
 MAX_TURNS=20
 MAX_IMAGES=100
 TEMPERATURE=0.6
@@ -129,6 +130,7 @@ python3 -u eval/infer_api.py \
     --max-turns $MAX_TURNS \
     --max-images $MAX_IMAGES \
     --max-total-tokens $MAX_TOTAL_TOKENS \
+    --max-completion-tokens $MAX_COMPLETION_TOKENS \
     --system-prompt-key $SYSTEM_PROMPT_TYPE \
     --num-workers $NUM_WORKERS \
     --tool-config-path $TOOL_CONFIG_PATH \

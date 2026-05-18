@@ -41,6 +41,7 @@ def _build_payload(model_name: str, messages: list, sampling_params: dict, tools
     # Add tools if provided (for function calling)
     if tools:
         payload["tools"] = tools
+        payload["tool_choice"] = os.environ.get("TOOL_CHOICE", "auto")
         if "o4-mini" not in model_name:
             payload["parallel_tool_calls"] = False
     

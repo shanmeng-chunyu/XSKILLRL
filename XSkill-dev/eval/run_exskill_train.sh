@@ -91,9 +91,10 @@ WEB_SEARCH_MAX_CALLS="${WEB_SEARCH_MAX_CALLS:-3}"
 # Inference Parameters
 # ============================================================================
 
-MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-24576}"
-MAX_TURNS="${MAX_TURNS:-12}"
-MAX_IMAGES="${MAX_IMAGES:-16}"
+MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-65536}"
+MAX_COMPLETION_TOKENS="${MAX_COMPLETION_TOKENS:-12288}"
+MAX_TURNS="${MAX_TURNS:-20}"
+MAX_IMAGES="${MAX_IMAGES:-100}"
 TEMPERATURE="${TEMPERATURE:-0.6}"
 TOP_P="${TOP_P:-1.0}"
 
@@ -163,6 +164,7 @@ python3 -u eval/infer_api.py \
     --max-turns "$MAX_TURNS" \
     --max-images "$MAX_IMAGES" \
     --max-total-tokens "$MAX_TOTAL_TOKENS" \
+    --max-completion-tokens "$MAX_COMPLETION_TOKENS" \
     --system-prompt-key "$SYSTEM_PROMPT_TYPE" \
     --num-workers "$NUM_WORKERS" \
     --tool-config-path "$TOOL_CONFIG_PATH" \
@@ -185,4 +187,5 @@ python3 -u eval/infer_api.py \
     --experience-max-items "$EXPERIENCE_MAX_ITEMS" \
     --skill-refine \
     --skill-max-length "$SKILL_MAX_LENGTH" \
+    --skip-completed \
     2>&1 | tee "$LOG_OUTPUT_DIR.log"

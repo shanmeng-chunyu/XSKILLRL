@@ -424,9 +424,24 @@ def _run_greedy_loop(current_node, model_caller, args, sampling_params, question
             current_node.mark_final(final_answer)
             break
         
-        else:
-            current_node.mark_final("Error: Could not parse model response.")
-            break
+        if action == "text" and isinstance(data, str) and data.strip() and turn < args.max_turns - 1:
+            correction = (
+                "Your previous message described a plan but did not execute it. "
+                "Continue now by either calling exactly one available tool through the tool-calling interface, "
+                "or, if you already know the answer, provide the final answer inside complete <answer>...</answer> tags. "
+                "Do not only describe the next action."
+            )
+            current_node.api_conversation_history.append({"role": "user", "content": correction})
+            current_node.conversation_history.append({"role": "user", "content": correction})
+            save_trajectory(save_dir, {
+                "turn_idx": turn,
+                "text_output": "[Parser correction] Model returned plain text without a tool call or <answer>; requesting a concrete tool call or final answer.",
+                "node_id": getattr(current_node, 'node_id', ''),
+            })
+            continue
+
+        current_node.mark_final("Error: Could not parse model response.")
+        break
     
     # Extract final answer from node
     if current_node.is_final:
