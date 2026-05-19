@@ -15,6 +15,7 @@
 
 import torch
 import numpy as np
+import os
 from verl import DataProto
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.model import compute_position_id_with_mask
@@ -23,8 +24,99 @@ from transformers import PreTrainedTokenizer
 import uuid
 from agent_system.multi_turn_rollout.utils import process_image, to_list_of_dict, torch_to_numpy, filter_group_data
 from agent_system.environments import EnvironmentManagerBase
-from typing import List, Dict
+from typing import Any, List, Dict
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
+
+
+def _is_image_array(value: Any) -> bool:
+    if isinstance(value, torch.Tensor):
+        return value.ndim >= 3
+    if isinstance(value, np.ndarray):
+        return value.ndim >= 3 and value.shape[-1] in (1, 3, 4)
+    return False
+
+
+def _normalize_observation_images(obs_image: Any) -> List[Any]:
+    if obs_image is None:
+        return []
+    if _is_image_array(obs_image):
+        return [obs_image]
+    if isinstance(obs_image, np.ndarray):
+        if obs_image.dtype == object:
+            if obs_image.ndim == 0:
+                return _normalize_observation_images(obs_image.item())
+            return [
+                image
+                for item in obs_image.tolist()
+                for image in _normalize_observation_images(item)
+            ]
+        return [obs_image]
+    if isinstance(obs_image, (list, tuple)):
+        return [
+            image
+            for item in obs_image
+            for image in _normalize_observation_images(item)
+        ]
+    return [obs_image]
+
+
+def _limit_image_placeholders(text: str, max_count: int) -> str:
+    if max_count < 0:
+        max_count = 0
+    kept = 0
+    parts = text.split("<image>")
+    if len(parts) == 1:
+        return text
+    output = [parts[0]]
+    for part in parts[1:]:
+        if kept < max_count:
+            output.append("<image>")
+            kept += 1
+        output.append(part)
+    return "".join(output)
+
+
+def _align_image_placeholders(text: str, image_count: int) -> str:
+    tag_count = text.count("<image>")
+    if image_count <= 0:
+        return _limit_image_placeholders(text, 0)
+    if tag_count < image_count:
+        missing = image_count - tag_count
+        image_tags = " ".join(["<image>"] * missing)
+        if tag_count == 0:
+            return f"{image_tags}\n{text}"
+        return f"{text}\n{image_tags}"
+    if tag_count > image_count:
+        return _limit_image_placeholders(text, image_count)
+    return text
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _candidate_max_pixels() -> List[int]:
+    configured = _env_int("XSKILL_RL_IMAGE_MAX_PIXELS", 1024 * 1024)
+    floor = _env_int("XSKILL_RL_IMAGE_MIN_MAX_PIXELS", 256 * 256)
+    candidates = [
+        configured,
+        1024 * 1024,
+        768 * 768,
+        512 * 512,
+        384 * 384,
+        256 * 256,
+        floor,
+    ]
+    unique = []
+    for value in candidates:
+        value = max(floor, int(value))
+        if value not in unique:
+            unique.append(value)
+    return sorted(unique, reverse=True)
+
 
 class TrajectoryCollector:
     def __init__(self, config, tokenizer: PreTrainedTokenizer, processor=None):
@@ -69,8 +161,9 @@ class TrajectoryCollector:
         obs_anchors = obs.get('anchor', None)
         obs_text = obs_texts[item] if obs_texts is not None else None
         obs_image = obs_images[item] if obs_images is not None else None
+        obs_image_list = _normalize_observation_images(obs_image)
         obs_anchor = obs_anchors[item] if obs_anchors is not None else None
-        is_multi_modal = obs_image is not None
+        is_multi_modal = len(obs_image_list) > 0
 
         _obs_anchor = torch_to_numpy(obs_anchor, is_object=True) if isinstance(obs_anchor, torch.Tensor) else obs_anchor
 
@@ -86,6 +179,7 @@ class TrajectoryCollector:
         else:
             print(f"Warning: No text observation found!")
 
+        obs_content = _align_image_placeholders(obs_content, len(obs_image_list))
         
         chat = np.array([{
             "content": obs_content,
@@ -101,30 +195,51 @@ class TrajectoryCollector:
         )
         
         # Initialize return dict
-        row_dict = {}
+        row_dict = {
+            'multi_modal_data': {},
+            'multi_modal_inputs': {},
+        }
         
         # Process multimodal data
+        image_grid_thw = None
         if is_multi_modal:
-            # Replace image placeholder with vision tokens
+            min_pixels = _env_int("XSKILL_RL_IMAGE_MIN_PIXELS", 128 * 128)
             raw_prompt = prompt_with_chat_template.replace('<image>', '<|vision_start|><|image_pad|><|vision_end|>')
-            row_dict['multi_modal_data'] = {'image': [process_image(obs_image)]}
-            image_inputs = self.processor.image_processor(row_dict['multi_modal_data']['image'], return_tensors='pt')
-            image_grid_thw = image_inputs['image_grid_thw']
-            row_dict['multi_modal_inputs'] = {key: val for key, val in image_inputs.items()}
-            if image_grid_thw is not None:
+            selected_prompt = None
+            selected_images = None
+            selected_inputs = None
+            selected_grid = None
+            for max_pixels in _candidate_max_pixels():
+                processed_images = [
+                    process_image(image, max_pixels=max_pixels, min_pixels=min_pixels)
+                    for image in obs_image_list
+                ]
+                image_inputs = self.processor.image_processor(processed_images, return_tensors='pt')
+                image_grid_thw = image_inputs['image_grid_thw']
+                expanded_prompt = prompt_with_chat_template
                 merge_length = self.processor.image_processor.merge_size**2
                 index = 0
-                while '<image>' in prompt_with_chat_template:
-                    prompt_with_chat_template = prompt_with_chat_template.replace(
+                while '<image>' in expanded_prompt and index < len(image_grid_thw):
+                    expanded_prompt = expanded_prompt.replace(
                         '<image>',
                         '<|vision_start|>' + '<|placeholder|>' * (image_grid_thw[index].prod() // merge_length) +
                         '<|vision_end|>',
                         1,
                     )
                     index += 1
-
-                prompt_with_chat_template = prompt_with_chat_template.replace('<|placeholder|>',
-                                                                                self.processor.image_token)
+                expanded_prompt = expanded_prompt.replace('<image>', '')
+                expanded_prompt = expanded_prompt.replace('<|placeholder|>', self.processor.image_token)
+                prompt_token_count = len(self.tokenizer.encode(expanded_prompt, add_special_tokens=False))
+                selected_prompt = expanded_prompt
+                selected_images = processed_images
+                selected_inputs = image_inputs
+                selected_grid = image_grid_thw
+                if prompt_token_count <= self.config.data.max_prompt_length:
+                    break
+            prompt_with_chat_template = selected_prompt
+            image_grid_thw = selected_grid
+            row_dict['multi_modal_data'] = {'image': selected_images}
+            row_dict['multi_modal_inputs'] = {key: val for key, val in selected_inputs.items()}
 
         else:
             raw_prompt = prompt_with_chat_template
@@ -138,7 +253,7 @@ class TrajectoryCollector:
         
         
 
-        if is_multi_modal:
+        if self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
 
             if "Qwen3VLProcessor" in self.processor.__class__.__name__:
                 from verl.models.transformers.qwen3_vl import get_rope_index

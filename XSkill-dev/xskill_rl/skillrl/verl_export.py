@@ -36,6 +36,10 @@ def _as_text_list(value: Any) -> List[str]:
     return [str(value)]
 
 
+def _as_verl_image_items(value: Any) -> List[Dict[str, str]]:
+    return [{"image": image} for image in _as_text_list(value)]
+
+
 def make_skill_augmented_messages(
     problem: str,
     *,
@@ -76,6 +80,7 @@ def sample_to_verl_record(
     doc_id = _as_text(sample.get("doc_id") or sample.get("question_id") or index)
     solution = _as_text(sample.get("solution", ""))
     images = _as_text_list(sample.get("images", []))
+    verl_images = _as_verl_image_items(images)
     sample_json = json.dumps(sample, ensure_ascii=False)
 
     benchmark_name = _as_text(sample.get("benchmark_name") or "xskill")
@@ -110,7 +115,7 @@ def sample_to_verl_record(
     return {
         "data_source": benchmark_name,
         "prompt": env_kwargs["prompt"],
-        "images": images,
+        "images": verl_images,
         "env_kwargs": env_kwargs,
         "reward_model": {
             "style": "xskill_rule_or_judge",

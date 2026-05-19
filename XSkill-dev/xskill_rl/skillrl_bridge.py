@@ -8,8 +8,11 @@ The SkillRL checkout imports this module from ``XSKILL_REPO_ROOT``.
 from __future__ import annotations
 
 import json
+import os
 import re
+from io import BytesIO
 from pathlib import Path
+from urllib.parse import urlparse, unquote
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
@@ -191,36 +194,91 @@ class XSkillVisualQAEnvironment:
         return str(item.get("problem", ""))
 
     def _load_images(self, items: Sequence[Dict[str, Any]]):
-        image_arrays = []
+        image_arrays = np.empty(len(items), dtype=object)
         has_image = False
-        for item in items:
-            image_path = self._resolve_first_image(item)
-            if image_path is None:
-                image_arrays.append(None)
+        for idx, item in enumerate(items):
+            image_paths = self._resolve_image_paths(item)
+            if not image_paths:
+                image_arrays[idx] = None
                 continue
+            loaded_images = []
             try:
                 from PIL import Image
-
-                image = Image.open(image_path).convert("RGB")
-                image_arrays.append(np.asarray(image))
-                has_image = True
             except Exception as exc:
-                print(f"[XSkillVisualQAEnvironment] Failed to load image {image_path}: {exc}")
-                image_arrays.append(None)
+                print(f"[XSkillVisualQAEnvironment] PIL import failed: {exc}")
+                image_arrays[idx] = None
+                continue
+            for image_path in image_paths:
+                try:
+                    if _is_http_url(image_path):
+                        image = self._load_remote_image(str(image_path), Image)
+                    else:
+                        image = Image.open(image_path).convert("RGB")
+                    loaded_images.append(np.asarray(image))
+                except Exception as exc:
+                    print(f"[XSkillVisualQAEnvironment] Failed to load image {image_path}: {exc}")
+            if loaded_images:
+                image_arrays[idx] = loaded_images
+                has_image = True
+            else:
+                image_arrays[idx] = None
         if not has_image:
             return None
-        return np.asarray(image_arrays, dtype=object)
+        return image_arrays
 
-    def _resolve_first_image(self, item: Dict[str, Any]) -> Optional[Path]:
+    def _load_remote_image(self, url: str, image_cls):
+        from urllib.request import Request, urlopen
+
+        request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(request, timeout=30) as response:
+            return image_cls.open(BytesIO(response.read())).convert("RGB")
+
+    def _resolve_first_image(self, item: Dict[str, Any]) -> Optional[Any]:
+        paths = self._resolve_image_paths(item, max_images=1)
+        return paths[0] if paths else None
+
+    def _resolve_image_paths(self, item: Dict[str, Any], max_images: Optional[int] = None) -> List[Any]:
         images = _as_list(item.get("images"))
         if not images:
+            return []
+        resolved = []
+        for image in images:
+            path = self._resolve_one_image(image)
+            if path is not None:
+                resolved.append(path)
+                if max_images is not None and len(resolved) >= max_images:
+                    break
+        return resolved
+
+    def _resolve_one_image(self, image: Any) -> Optional[Any]:
+        if isinstance(image, dict):
+            image = image.get("image") or image.get("path") or image.get("url")
+        if image is None:
             return None
-        first = Path(str(images[0]))
+        text = _normalize_url(str(image))
+        if _is_http_url(text):
+            return text
+        if text.startswith("file://"):
+            parsed = urlparse(text)
+            candidate = Path(unquote(parsed.path))
+            if candidate.is_file():
+                return candidate
+        first = Path(text)
         if first.is_file():
             return first
+        env_image_root = os.environ.get("XSKILL_IMAGE_ROOT")
+        if env_image_root:
+            candidate = Path(env_image_root) / first
+            if candidate.is_file():
+                return candidate
         image_root = _cfg_get(_cfg_get(self.config.env, "xskill", {}), "image_root", None)
         if image_root:
             candidate = Path(str(image_root)) / first
+            if candidate.is_file():
+                return candidate
+        env_repo_root = os.environ.get("XSKILL_REPO_ROOT")
+        if env_repo_root:
+            candidate = Path(env_repo_root) / first
             if candidate.is_file():
                 return candidate
         repo_root = _cfg_get(_cfg_get(self.config.env, "xskill", {}), "repo_root", None)
@@ -290,6 +348,20 @@ def _cfg_get(container, key: str, default=None):
     if hasattr(container, "get"):
         return container.get(key, default)
     return getattr(container, key, default)
+
+
+def _normalize_url(value: str) -> str:
+    text = value.strip()
+    if text.startswith("https:/") and not text.startswith("https://"):
+        return "https://" + text[len("https:/") :]
+    if text.startswith("http:/") and not text.startswith("http://"):
+        return "http://" + text[len("http:/") :]
+    return text
+
+
+def _is_http_url(value: Any) -> bool:
+    text = str(value)
+    return text.startswith(("http://", "https://"))
 
 
 def _as_list(value) -> List[Any]:

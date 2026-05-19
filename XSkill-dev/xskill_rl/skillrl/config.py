@@ -39,11 +39,18 @@ class SkillRLGRPOConfig:
     log_prob_micro_batch_size_per_gpu: int = 8
     tensor_model_parallel_size: int = 1
     rollout_engine: str = "vllm"
+    model_dtype: str = "bfloat16"
     gpu_memory_utilization: float = 0.7
+    rollout_max_model_len: Optional[int] = None
+    rollout_max_num_batched_tokens: Optional[int] = None
+    rollout_limit_images: Optional[int] = None
     kl_loss_coef: float = 0.01
     invalid_action_penalty_coef: float = 0.1
     max_prompt_length: int = 6000
     max_response_length: int = 1024
+    actor_ppo_max_token_len_per_gpu: Optional[int] = None
+    rollout_log_prob_max_token_len_per_gpu: Optional[int] = None
+    ref_log_prob_max_token_len_per_gpu: Optional[int] = None
     total_epochs: int = 150
     save_freq: int = 10
     test_freq: int = 5
@@ -74,6 +81,7 @@ class SkillRLGRPOConfig:
                 "actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="
                 f"{self.ppo_micro_batch_size_per_gpu}"
             ),
+            f"+actor_rollout_ref.actor.fsdp_config.model_dtype={self.model_dtype}",
             "actor_rollout_ref.actor.use_kl_loss=True",
             f"actor_rollout_ref.actor.kl_loss_coef={self.kl_loss_coef}",
             "actor_rollout_ref.actor.kl_loss_type=low_var_kl",
@@ -84,11 +92,13 @@ class SkillRLGRPOConfig:
             ),
             f"actor_rollout_ref.rollout.tensor_model_parallel_size={self.tensor_model_parallel_size}",
             f"actor_rollout_ref.rollout.name={self.rollout_engine}",
+            f"actor_rollout_ref.rollout.dtype={self.model_dtype}",
             f"actor_rollout_ref.rollout.gpu_memory_utilization={self.gpu_memory_utilization}",
             (
                 "actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="
                 f"{self.log_prob_micro_batch_size_per_gpu}"
             ),
+            f"+actor_rollout_ref.ref.fsdp_config.model_dtype={self.model_dtype}",
             "actor_rollout_ref.ref.fsdp_config.param_offload=True",
             "actor_rollout_ref.actor.use_invalid_action_penalty=True",
             (
@@ -110,6 +120,31 @@ class SkillRLGRPOConfig:
             f"trainer.test_freq={self.test_freq}",
             f"trainer.total_epochs={self.total_epochs}",
         ]
+
+        if self.actor_ppo_max_token_len_per_gpu is not None:
+            overrides.append(
+                "actor_rollout_ref.actor.ppo_max_token_len_per_gpu="
+                f"{self.actor_ppo_max_token_len_per_gpu}"
+            )
+        if self.rollout_max_model_len is not None:
+            overrides.append(f"actor_rollout_ref.rollout.max_model_len={self.rollout_max_model_len}")
+        if self.rollout_max_num_batched_tokens is not None:
+            overrides.append(
+                "actor_rollout_ref.rollout.max_num_batched_tokens="
+                f"{self.rollout_max_num_batched_tokens}"
+            )
+        if self.rollout_limit_images is not None:
+            overrides.append(f"+actor_rollout_ref.rollout.limit_images={self.rollout_limit_images}")
+        if self.rollout_log_prob_max_token_len_per_gpu is not None:
+            overrides.append(
+                "actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="
+                f"{self.rollout_log_prob_max_token_len_per_gpu}"
+            )
+        if self.ref_log_prob_max_token_len_per_gpu is not None:
+            overrides.append(
+                "actor_rollout_ref.ref.log_prob_max_token_len_per_gpu="
+                f"{self.ref_log_prob_max_token_len_per_gpu}"
+            )
 
         if self.skill_bank_json:
             overrides.extend(

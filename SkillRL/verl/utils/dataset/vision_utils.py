@@ -13,6 +13,8 @@
 # limitations under the License.
 
 from io import BytesIO
+import os
+from pathlib import Path
 from typing import Optional, Union
 
 import torch
@@ -20,9 +22,73 @@ from PIL import Image
 from qwen_vl_utils import fetch_image, fetch_video
 
 
-def process_image(image: Union[dict, Image.Image]) -> Image.Image:
+def _is_uri(value: str) -> bool:
+    return value.startswith(("http://", "https://", "file://", "data:image"))
+
+
+def _normalize_url(value: str) -> str:
+    if value.startswith("https:/") and not value.startswith("https://"):
+        return "https://" + value[len("https:/") :]
+    if value.startswith("http:/") and not value.startswith("http://"):
+        return "http://" + value[len("http:/") :]
+    return value
+
+
+def _as_existing_file_uri(path: Path) -> str | None:
+    try:
+        if path.exists():
+            return path.resolve().as_uri()
+    except OSError:
+        return None
+    return None
+
+
+def _resolve_image_string(image: str) -> str:
+    image = _normalize_url(image.strip())
+    if not image or _is_uri(image):
+        return image
+
+    raw_path = Path(image)
+    if raw_path.is_absolute():
+        return _as_existing_file_uri(raw_path) or image
+
+    candidates: list[Path] = []
+    for env_name in ("XSKILL_IMAGE_ROOT", "XSKILL_BENCHMARK_ROOT"):
+        env_value = os.environ.get(env_name)
+        if env_value:
+            candidates.append(Path(env_value) / raw_path)
+
+    repo_root = os.environ.get("XSKILL_REPO_ROOT")
+    if repo_root:
+        candidates.append(Path(repo_root) / raw_path)
+        candidates.append(Path(repo_root) / "benchmark" / raw_path)
+
+    cwd = Path.cwd()
+    candidates.extend(
+        [
+            cwd / raw_path,
+            cwd.parent / "XSkill-dev" / raw_path,
+            cwd.parent / "XSkill-dev" / "benchmark" / raw_path,
+        ]
+    )
+
+    for candidate in candidates:
+        uri = _as_existing_file_uri(candidate)
+        if uri:
+            return uri
+    return image
+
+
+def process_image(image: Union[str, os.PathLike, dict, Image.Image]) -> Image.Image:
     if isinstance(image, Image.Image):
         return image.convert("RGB")
+
+    if isinstance(image, (str, os.PathLike)):
+        image = {"image": _resolve_image_string(os.fspath(image))}
+    else:
+        image = dict(image)
+        if isinstance(image.get("image"), (str, os.PathLike)):
+            image["image"] = _resolve_image_string(os.fspath(image["image"]))
 
     if "bytes" in image:
         assert "image" not in image, "Cannot have both `bytes` and `image`"

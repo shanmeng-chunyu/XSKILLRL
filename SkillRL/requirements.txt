@@ -1,4 +1,12 @@
-# requirements.txt records the full set of dependencies for development
+# SkillRL/verl environment for XSkill GRPO training.
+#
+# Recommended:
+#   conda create -n skillrl python=3.10 -y
+#   conda activate skillrl
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+#   pip install -r requirements.txt
+#
+# Keep vllm below the newer API break that removed vllm.lora.models.
 accelerate
 codetiming
 datasets
@@ -16,10 +24,11 @@ pre-commit
 ray[default]
 tensordict<=0.6.2
 torchdata
-transformers==4.51.1
-# vllm==0.8.4
+transformers==4.57.1
+huggingface-hub>=0.23.2,<1.0
+vllm==0.11.0
 wandb
 packaging>=20.0
 uvicorn
 fastapi
-qwen-vl-utils[decord]
+qwen-vl-utils[decord]==0.0.14

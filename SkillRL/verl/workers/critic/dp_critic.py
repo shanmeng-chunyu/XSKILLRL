@@ -61,8 +61,21 @@ class DataParallelPPOCritic(BasePPOCritic):
         response_length = micro_batch["responses"].size(-1)
         multi_modal_inputs = {}
         if "multi_modal_inputs" in micro_batch:
-            for key in micro_batch["multi_modal_inputs"][0].keys():
-                multi_modal_inputs[key] = torch.cat([inputs[key] for inputs in micro_batch["multi_modal_inputs"]], dim=0)
+            keys = []
+            for inputs in micro_batch["multi_modal_inputs"]:
+                if not isinstance(inputs, dict):
+                    continue
+                for key in inputs.keys():
+                    if key not in keys:
+                        keys.append(key)
+            for key in keys:
+                values = [
+                    inputs[key]
+                    for inputs in micro_batch["multi_modal_inputs"]
+                    if isinstance(inputs, dict) and key in inputs
+                ]
+                if values:
+                    multi_modal_inputs[key] = torch.cat(values, dim=0)
 
         with torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
             input_ids = micro_batch["input_ids"]
@@ -78,8 +91,9 @@ class DataParallelPPOCritic(BasePPOCritic):
 
                 # unpad the position_ids to align the rotary
                 if position_ids.dim() == 3:
-                    position_ids_rmpad =
-                    index_first_axis(rearrange(position_ids, "c b s ... -> (b s) c ..."), indices).transpose(0, 1).unsqueeze(1)  # (4, bsz, seqlen) -> (4, 1, bsz * seqlen)
+                    position_ids_rmpad = index_first_axis(
+                        rearrange(position_ids, "c b s ... -> (b s) c ..."), indices
+                    ).transpose(0, 1).unsqueeze(1)  # (4, bsz, seqlen) -> (4, 1, bsz * seqlen)
                 else:
                     position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices).transpose(0, 1)
 
