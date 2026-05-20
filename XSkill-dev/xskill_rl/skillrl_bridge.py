@@ -266,6 +266,9 @@ class XSkillVisualQAEnvironment:
         first = Path(text)
         if first.is_file():
             return first
+        relocated = _resolve_relocated_image(first, self.config)
+        if relocated is not None:
+            return relocated
         env_image_root = os.environ.get("XSKILL_IMAGE_ROOT")
         if env_image_root:
             candidate = Path(env_image_root) / first
@@ -314,6 +317,59 @@ class XSkillVisualQAEnvironment:
             "is_action_valid": True,
             "tool_calling": 0.0,
         }
+
+
+def _image_suffixes(path: Path) -> List[Path]:
+    parts = path.parts
+    suffixes: List[Path] = []
+    for marker in ("images", "benchmark"):
+        if marker in parts:
+            index = parts.index(marker)
+            if index + 1 < len(parts):
+                suffixes.append(Path(*parts[index + 1 :]))
+            suffixes.append(Path(*parts[index:]))
+    if path.name:
+        suffixes.append(Path(path.name))
+    return suffixes
+
+
+def _candidate_image_roots(config) -> List[Path]:
+    roots: List[Path] = []
+    env_image_root = os.environ.get("XSKILL_IMAGE_ROOT")
+    if env_image_root:
+        roots.append(Path(env_image_root))
+
+    image_root = _cfg_get(_cfg_get(config.env, "xskill", {}), "image_root", None)
+    if image_root:
+        roots.append(Path(str(image_root)))
+
+    env_repo_root = os.environ.get("XSKILL_REPO_ROOT")
+    if env_repo_root:
+        repo_path = Path(env_repo_root)
+        roots.extend([repo_path, repo_path / "benchmark", repo_path.parent / "images"])
+
+    repo_root = _cfg_get(_cfg_get(config.env, "xskill", {}), "repo_root", None)
+    if repo_root:
+        repo_path = Path(str(repo_root))
+        roots.extend([repo_path, repo_path / "benchmark", repo_path.parent / "images"])
+
+    cwd = Path.cwd()
+    roots.extend([cwd, cwd / "images", cwd.parent / "images", cwd.parent / "XSkill-dev"])
+    return roots
+
+
+def _resolve_relocated_image(path: Path, config) -> Optional[Path]:
+    candidates = [path]
+    if path.is_absolute():
+        candidates = _image_suffixes(path)
+    else:
+        candidates.extend(_image_suffixes(path))
+    for root in _candidate_image_roots(config):
+        for candidate in candidates:
+            resolved = root / candidate
+            if resolved.is_file():
+                return resolved
+    return None
 
 
 def _iter_records_from_files(data_files) -> Iterable[Dict[str, Any]]:

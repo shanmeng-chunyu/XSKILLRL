@@ -37,7 +37,25 @@ def image_values(record: dict[str, Any]) -> list[Any]:
             values.extend(images)
         else:
             values.append(images)
-    return values
+    return list(_flatten_image_values(values))
+
+
+def _flatten_image_values(values: Any) -> list[Any]:
+    if values is None:
+        return []
+    if isinstance(values, dict):
+        if any(key in values for key in ("image", "path", "url")):
+            return [values]
+        flattened: list[Any] = []
+        for value in values.values():
+            flattened.extend(_flatten_image_values(value))
+        return flattened
+    if isinstance(values, (list, tuple)):
+        flattened = []
+        for value in values:
+            flattened.extend(_flatten_image_values(value))
+        return flattened
+    return [values]
 
 
 def image_path(value: Any) -> str | None:
@@ -57,11 +75,31 @@ def resolve_image(path_text: str, roots: list[Path]) -> Path | None:
     path = Path(path_text)
     if path.is_absolute() and path.is_file():
         return path
+    candidates = [path]
+    if path.is_absolute():
+        candidates = _image_suffixes(path)
+    else:
+        candidates.extend(_image_suffixes(path))
     for root in roots:
-        candidate = root / path
-        if candidate.is_file():
-            return candidate
+        for relative in candidates:
+            candidate = root / relative
+            if candidate.is_file():
+                return candidate
     return None
+
+
+def _image_suffixes(path: Path) -> list[Path]:
+    parts = path.parts
+    suffixes: list[Path] = []
+    for marker in ("images", "benchmark"):
+        if marker in parts:
+            index = parts.index(marker)
+            if index + 1 < len(parts):
+                suffixes.append(Path(*parts[index + 1 :]))
+            suffixes.append(Path(*parts[index:]))
+    if path.name:
+        suffixes.append(Path(path.name))
+    return suffixes
 
 
 def check_file(label: str, path: Path) -> bool:
@@ -89,7 +127,7 @@ def main() -> None:
     xskill_root = Path(args.xskill_root or os.environ.get("XSKILL_REPO_ROOT") or script_root).resolve()
     skillrl_root = Path(args.skillrl_root or os.environ.get("SKILLRL_REPO_ROOT") or xskill_root.parent / "SkillRL").resolve()
     image_root = Path(args.image_root or os.environ.get("XSKILL_IMAGE_ROOT") or xskill_root).resolve()
-    roots = [image_root, xskill_root, xskill_root / "benchmark", Path.cwd()]
+    roots = [image_root, xskill_root, xskill_root / "benchmark", xskill_root.parent / "images", Path.cwd()]
 
     ok = True
     ok &= check_file("XSkill root", xskill_root)

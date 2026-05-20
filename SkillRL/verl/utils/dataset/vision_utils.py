@@ -43,6 +43,67 @@ def _as_existing_file_uri(path: Path) -> str | None:
     return None
 
 
+def _image_suffixes(path: Path) -> list[Path]:
+    parts = path.parts
+    suffixes: list[Path] = []
+    for marker in ("images", "benchmark"):
+        if marker in parts:
+            index = parts.index(marker)
+            if index + 1 < len(parts):
+                suffixes.append(Path(*parts[index + 1 :]))
+            suffixes.append(Path(*parts[index:]))
+    if path.name:
+        suffixes.append(Path(path.name))
+    return suffixes
+
+
+def _image_roots() -> list[Path]:
+    roots: list[Path] = []
+    for env_name in ("XSKILL_IMAGE_ROOT", "XSKILL_BENCHMARK_ROOT"):
+        env_value = os.environ.get(env_name)
+        if env_value:
+            roots.append(Path(env_value))
+
+    repo_root = os.environ.get("XSKILL_REPO_ROOT")
+    if repo_root:
+        repo_path = Path(repo_root)
+        roots.extend(
+            [
+                repo_path,
+                repo_path / "benchmark",
+                repo_path.parent / "images",
+            ]
+        )
+
+    cwd = Path.cwd()
+    roots.extend(
+        [
+            cwd,
+            cwd / "images",
+            cwd.parent / "images",
+            cwd.parent / "XSkill-dev",
+            cwd.parent / "XSkill-dev" / "benchmark",
+        ]
+    )
+    return roots
+
+
+def _resolve_against_roots(raw_path: Path) -> str | None:
+    candidate_relatives = [raw_path]
+    if raw_path.is_absolute():
+        candidate_relatives = _image_suffixes(raw_path)
+    else:
+        candidate_relatives.extend(_image_suffixes(raw_path))
+
+    for root in _image_roots():
+        for relative in candidate_relatives:
+            candidate = root / relative
+            uri = _as_existing_file_uri(candidate)
+            if uri:
+                return uri
+    return None
+
+
 def _resolve_image_string(image: str) -> str:
     image = _normalize_url(image.strip())
     if not image or _is_uri(image):
@@ -50,33 +111,9 @@ def _resolve_image_string(image: str) -> str:
 
     raw_path = Path(image)
     if raw_path.is_absolute():
-        return _as_existing_file_uri(raw_path) or image
+        return _as_existing_file_uri(raw_path) or _resolve_against_roots(raw_path) or image
 
-    candidates: list[Path] = []
-    for env_name in ("XSKILL_IMAGE_ROOT", "XSKILL_BENCHMARK_ROOT"):
-        env_value = os.environ.get(env_name)
-        if env_value:
-            candidates.append(Path(env_value) / raw_path)
-
-    repo_root = os.environ.get("XSKILL_REPO_ROOT")
-    if repo_root:
-        candidates.append(Path(repo_root) / raw_path)
-        candidates.append(Path(repo_root) / "benchmark" / raw_path)
-
-    cwd = Path.cwd()
-    candidates.extend(
-        [
-            cwd / raw_path,
-            cwd.parent / "XSkill-dev" / raw_path,
-            cwd.parent / "XSkill-dev" / "benchmark" / raw_path,
-        ]
-    )
-
-    for candidate in candidates:
-        uri = _as_existing_file_uri(candidate)
-        if uri:
-            return uri
-    return image
+    return _resolve_against_roots(raw_path) or image
 
 
 def process_image(image: Union[str, os.PathLike, dict, Image.Image]) -> Image.Image:

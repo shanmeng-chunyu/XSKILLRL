@@ -89,6 +89,19 @@ rsync -av old_server:/path/to/XSKILLRL/XSkill-dev/benchmark/ ./benchmark/
 
 不要在 RL 训练时实时访问 GitHub/raw URL 图片。网络抖动会导致 `Connection reset by peer`、`FileNotFoundError` 或图像 token 对不齐。
 
+如果你从旧服务器复制了已经下载好的图片，推荐放到仓库同级目录：
+
+```text
+XSKILLRL/
+  images/
+    agentvista/
+      agentvista_000002_field_images_0.png
+  XSkill-dev/
+  SkillRL/
+```
+
+训练脚本会优先把 `XSKILL_IMAGE_ROOT` 指向 `XSKILLRL/images`。即使 parquet 里还保留旧服务器绝对路径，例如 `/data/luzy/xskill/images/agentvista/a.png`，当前路径解析也会尝试用 `images/` 后面的相对路径重定位到 `XSKILLRL/images/agentvista/a.png`。
+
 在 `XSkill-dev` 目录执行：
 
 ```bash
