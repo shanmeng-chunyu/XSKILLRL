@@ -76,7 +76,11 @@ def main() -> None:
     parser.add_argument("--skillrl-root", default=None)
     parser.add_argument("--train-file", default="output/rl_data/skillrl_train.parquet")
     parser.add_argument("--val-file", default="output/rl_data/skillrl_val.parquet")
-    parser.add_argument("--skill-bank-json", default="memory_bank/test/skillrl_skill_bank.json")
+    parser.add_argument(
+        "--skill-bank-json",
+        default=None,
+        help="Optional SkillBank JSON path. Omit this for no-memory GRPO baseline checks.",
+    )
     parser.add_argument("--image-root", default=None)
     parser.add_argument("--sample-limit", type=int, default=200)
     args = parser.parse_args()
@@ -92,16 +96,19 @@ def main() -> None:
     ok &= check_file("SkillRL root", skillrl_root)
     train_file = Path(args.train_file)
     val_file = Path(args.val_file)
-    skill_bank = Path(args.skill_bank_json)
     if not train_file.is_absolute():
         train_file = xskill_root / train_file
     if not val_file.is_absolute():
         val_file = xskill_root / val_file
-    if not skill_bank.is_absolute():
-        skill_bank = xskill_root / skill_bank
     ok &= check_file("train file", train_file)
     ok &= check_file("val file", val_file)
-    ok &= check_file("skill bank", skill_bank)
+    if args.skill_bank_json:
+        skill_bank = Path(args.skill_bank_json)
+        if not skill_bank.is_absolute():
+            skill_bank = xskill_root / skill_bank
+        ok &= check_file("skill bank", skill_bank)
+    else:
+        print("[SKIP] skill bank: not required for no-memory baseline")
     print(f"[INFO] image roots: {', '.join(str(root) for root in roots)}")
 
     missing_images: list[str] = []
