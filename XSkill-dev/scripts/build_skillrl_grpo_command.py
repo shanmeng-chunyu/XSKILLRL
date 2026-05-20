@@ -102,10 +102,16 @@ def main() -> None:
     parser.add_argument("--enable-dynamic-update", action="store_true")
     parser.add_argument("--train-batch-size", type=int, default=64)
     parser.add_argument("--val-batch-size", type=int, default=64)
+    parser.add_argument("--ppo-mini-batch-size", type=int, default=64)
+    parser.add_argument("--ppo-micro-batch-size-per-gpu", type=int, default=4)
+    parser.add_argument("--log-prob-micro-batch-size-per-gpu", type=int, default=8)
     parser.add_argument("--group-size", type=int, default=8)
     parser.add_argument("--n-gpus-per-node", type=int, default=8)
     parser.add_argument("--nnodes", type=int, default=1)
     parser.add_argument("--model-dtype", choices=["bfloat16", "float16", "float32", "bf16", "fp16", "fp32"], default="bfloat16")
+    parser.add_argument("--max-prompt-length", type=int, default=6000)
+    parser.add_argument("--max-response-length", type=int, default=1024)
+    parser.add_argument("--rollout-gpu-memory-utilization", type=float, default=0.7)
     parser.add_argument("--rollout-max-model-len", type=int, default=None)
     parser.add_argument("--rollout-max-num-batched-tokens", type=int, default=None)
     parser.add_argument("--rollout-limit-images", type=int, default=None)
@@ -166,8 +172,14 @@ def main() -> None:
         enable_dynamic_update=args.enable_dynamic_update,
         train_batch_size=args.train_batch_size,
         val_batch_size=args.val_batch_size,
+        ppo_mini_batch_size=args.ppo_mini_batch_size,
+        ppo_micro_batch_size_per_gpu=args.ppo_micro_batch_size_per_gpu,
+        log_prob_micro_batch_size_per_gpu=args.log_prob_micro_batch_size_per_gpu,
         group_size=args.group_size,
         model_dtype=args.model_dtype,
+        gpu_memory_utilization=args.rollout_gpu_memory_utilization,
+        max_prompt_length=args.max_prompt_length,
+        max_response_length=args.max_response_length,
         rollout_max_model_len=args.rollout_max_model_len,
         rollout_max_num_batched_tokens=args.rollout_max_num_batched_tokens,
         rollout_limit_images=args.rollout_limit_images,
