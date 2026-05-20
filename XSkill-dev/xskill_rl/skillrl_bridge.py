@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import ast
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -423,10 +424,25 @@ def _is_http_url(value: Any) -> bool:
 def _as_list(value) -> List[Any]:
     if value is None:
         return []
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith(("[", "{")):
+            try:
+                return _as_list(ast.literal_eval(text))
+            except (SyntaxError, ValueError):
+                pass
+        return [value]
     if isinstance(value, list):
         return value
+    if isinstance(value, tuple):
+        return list(value)
     if isinstance(value, np.ndarray):
         return value.tolist()
+    if hasattr(value, "tolist"):
+        try:
+            return _as_list(value.tolist())
+        except Exception:
+            pass
     return [value]
 
 

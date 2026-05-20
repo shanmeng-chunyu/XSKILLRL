@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 from pathlib import Path
@@ -43,6 +44,19 @@ def image_values(record: dict[str, Any]) -> list[Any]:
 def _flatten_image_values(values: Any) -> list[Any]:
     if values is None:
         return []
+    if isinstance(values, str):
+        text = values.strip()
+        if text.startswith(("[", "{")):
+            try:
+                return _flatten_image_values(ast.literal_eval(text))
+            except (SyntaxError, ValueError):
+                pass
+        return [values]
+    if hasattr(values, "tolist") and not isinstance(values, (str, bytes)):
+        try:
+            return _flatten_image_values(values.tolist())
+        except Exception:
+            pass
     if isinstance(values, dict):
         if any(key in values for key in ("image", "path", "url")):
             return [values]
@@ -124,9 +138,9 @@ def main() -> None:
     args = parser.parse_args()
 
     script_root = Path(__file__).resolve().parents[1]
-    xskill_root = Path(args.xskill_root or os.environ.get("XSKILL_REPO_ROOT") or script_root).resolve()
-    skillrl_root = Path(args.skillrl_root or os.environ.get("SKILLRL_REPO_ROOT") or xskill_root.parent / "SkillRL").resolve()
-    image_root = Path(args.image_root or os.environ.get("XSKILL_IMAGE_ROOT") or xskill_root).resolve()
+    xskill_root = Path(args.xskill_root or os.environ.get("XSKILL_REPO_ROOT") or script_root).expanduser().resolve()
+    skillrl_root = Path(args.skillrl_root or os.environ.get("SKILLRL_REPO_ROOT") or xskill_root.parent / "SkillRL").expanduser().resolve()
+    image_root = Path(args.image_root or os.environ.get("XSKILL_IMAGE_ROOT") or xskill_root).expanduser().resolve()
     roots = [image_root, xskill_root, xskill_root / "benchmark", xskill_root.parent / "images", Path.cwd()]
 
     ok = True
@@ -134,6 +148,8 @@ def main() -> None:
     ok &= check_file("SkillRL root", skillrl_root)
     train_file = Path(args.train_file)
     val_file = Path(args.val_file)
+    train_file = train_file.expanduser()
+    val_file = val_file.expanduser()
     if not train_file.is_absolute():
         train_file = xskill_root / train_file
     if not val_file.is_absolute():
@@ -142,6 +158,7 @@ def main() -> None:
     ok &= check_file("val file", val_file)
     if args.skill_bank_json:
         skill_bank = Path(args.skill_bank_json)
+        skill_bank = skill_bank.expanduser()
         if not skill_bank.is_absolute():
             skill_bank = xskill_root / skill_bank
         ok &= check_file("skill bank", skill_bank)

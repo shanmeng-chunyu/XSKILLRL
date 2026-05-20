@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import copy
+import ast
 import logging
 import os
 import re
@@ -32,6 +33,37 @@ import verl.utils.torch_functional as verl_F
 from verl.utils.model import compute_position_id_with_mask
 
 logger = logging.getLogger(__name__)
+
+
+def _flatten_media_items(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith(("[", "{")):
+            try:
+                return _flatten_media_items(ast.literal_eval(text))
+            except (SyntaxError, ValueError):
+                pass
+        return [value]
+    if hasattr(value, "tolist") and not isinstance(value, (bytes, str)):
+        try:
+            return _flatten_media_items(value.tolist())
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        if any(key in value for key in ("image", "path", "url", "video")):
+            return [value]
+        flattened = []
+        for item in value.values():
+            flattened.extend(_flatten_media_items(item))
+        return flattened
+    if isinstance(value, (list, tuple, ListConfig)):
+        flattened = []
+        for item in value:
+            flattened.extend(_flatten_media_items(item))
+        return flattened
+    return [value]
 
 
 def collate_fn(data_list: list[dict]) -> dict:
@@ -194,14 +226,14 @@ class RLHFDataset(Dataset):
 
             images = None
             if self.image_key in row_dict:
-                image_items = row_dict.pop(self.image_key) or []
+                image_items = _flatten_media_items(row_dict.pop(self.image_key))
                 if len(image_items) > 0:
                     images = [process_image(image) for image in image_items]
                     multi_modal_data["image"] = images
 
             videos = None
             if self.video_key in row_dict:
-                video_items = row_dict.pop(self.video_key) or []
+                video_items = _flatten_media_items(row_dict.pop(self.video_key))
                 if len(video_items) > 0:
                     videos = [process_video(video) for video in video_items]
                     multi_modal_data["video"] = [video.numpy() for video in videos]
