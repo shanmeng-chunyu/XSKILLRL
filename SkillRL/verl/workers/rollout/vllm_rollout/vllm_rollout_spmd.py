@@ -164,6 +164,10 @@ class vLLMRollout(BaseRollout):
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        # Avoid stale multimodal preprocessor cache assertions in long-running
+        # RL jobs with mixed multi-image batches. This matches the async engine
+        # path, which already disables the MM preprocessor cache explicitly.
+        engine_kwargs.setdefault("disable_mm_preprocessor_cache", True)
         if config.get("limit_images", None):  # support for multi-image data
             engine_kwargs["limit_mm_per_prompt"] = {"image": config.get("limit_images")}
 

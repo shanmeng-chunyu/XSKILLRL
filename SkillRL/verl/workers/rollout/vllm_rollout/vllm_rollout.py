@@ -117,6 +117,11 @@ class vLLMRollout(BaseRollout):
         #    (which can vary across different vLLM versions);
         # - Otherwise it's the desired value we want to explicitly set.
         engine_kwargs = {key: val for key, val in engine_kwargs.items() if val is not None}
+        # vLLM's processed multimodal input cache can hit stale/missing-cache
+        # assertions in long-running Ray RL jobs with mixed multi-image samples.
+        # Keep it disabled by default; users can explicitly override this through
+        # actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache.
+        engine_kwargs.setdefault("disable_mm_preprocessor_cache", True)
         lora_kwargs = kwargs.pop('lora_kwargs', {})
         self.lora_kwargs = lora_kwargs
         self.inference_engine = LLM(
