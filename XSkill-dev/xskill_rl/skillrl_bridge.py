@@ -19,6 +19,14 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 import numpy as np
 
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a multimodal reasoning agent. Use the provided skills when they "
+    "are relevant, reason carefully over the question and images, and produce "
+    "the final answer."
+)
+SKILL_SECTION_TITLE = "## Retrieved Relevant Experience"
+
+
 def make_xskill_envs_from_skillrl(config):
     """Factory called by the patched SkillRL ``env_manager.make_envs``."""
 
@@ -40,6 +48,7 @@ class XSkillVisualQAEnvironment:
         self.is_train = is_train
         self.cursor = 0
         self.current_items: List[Dict[str, Any]] = []
+        self.retrieval_memory = self._init_retrieval_memory()
         self.samples = self._load_samples_from_config()
 
     def reset(self, kwargs=None):
@@ -182,6 +191,9 @@ class XSkillVisualQAEnvironment:
         return payload
 
     def _prompt_text(self, item: Dict[str, Any]) -> str:
+        if self.retrieval_memory is not None:
+            return self._runtime_skill_prompt(item)
+
         prompt = item.get("prompt")
         if isinstance(prompt, list):
             lines = []
@@ -193,6 +205,74 @@ class XSkillVisualQAEnvironment:
         if isinstance(prompt, str) and prompt:
             return prompt
         return str(item.get("problem", ""))
+
+    def _runtime_skill_prompt(self, item: Dict[str, Any]) -> str:
+        """Build the prompt from the current SkillBank at rollout time.
+
+        This deliberately ignores any skill text already serialized into the
+        parquet record.  Passing a skill bank to the runtime env should mean
+        the bank is the source of truth, including skills added later by
+        validation-time updates.
+        """
+
+        problem = str(item.get("problem", ""))
+        skill_cfg = _cfg_get(self.config.env, "skills_only_memory", {})
+        top_k = int(_cfg_get(skill_cfg, "top_k", 6) or 6)
+        retrieval_payload: Dict[str, Any] = {}
+        skill_text = ""
+        try:
+            retrieval_payload = self.retrieval_memory.retrieve(
+                task_description=problem,
+                top_k=top_k,
+            )
+            skill_text = self.retrieval_memory.format_for_prompt(retrieval_payload)
+        except Exception as exc:
+            print(f"[XSkillVisualQAEnvironment] Skill retrieval failed for {item.get('doc_id')}: {exc}")
+
+        item["skill_retrieval"] = {
+            "enabled": True,
+            "runtime": True,
+            "top_k": top_k,
+            "task_type": str(retrieval_payload.get("task_type", "")),
+            "retrieval_mode": str(retrieval_payload.get("retrieval_mode", "")),
+        }
+
+        system_prompt = _cfg_get(_cfg_get(self.config.env, "xskill", {}), "system_prompt", DEFAULT_SYSTEM_PROMPT)
+        if skill_text and skill_text != "No relevant skills found for this task.":
+            system_prompt = f"{system_prompt}\n\n{SKILL_SECTION_TITLE}\n{skill_text}"
+        return f"SYSTEM:\n{system_prompt}\n\nUSER:\n{problem}"
+
+    def _init_retrieval_memory(self):
+        if not bool(_cfg_get(self.config.env, "use_skills_only_memory", False)):
+            return None
+
+        skill_cfg = _cfg_get(self.config.env, "skills_only_memory", {})
+        skills_json_path = _cfg_get(skill_cfg, "skills_json_path", None)
+        if not skills_json_path:
+            print("[XSkillVisualQAEnvironment] use_skills_only_memory is enabled but no skills_json_path was provided")
+            return None
+
+        try:
+            from agent_system.memory import SkillsOnlyMemory
+        except Exception as exc:
+            print(f"[XSkillVisualQAEnvironment] Could not import SkillRL SkillsOnlyMemory: {exc}")
+            return None
+
+        memory_kwargs = {
+            "skills_json_path": str(skills_json_path),
+            "retrieval_mode": _cfg_get(skill_cfg, "retrieval_mode", "template"),
+            "embedding_model_path": _cfg_get(skill_cfg, "embedding_model_path", None),
+            "task_specific_top_k": _cfg_get(skill_cfg, "task_specific_top_k", None),
+        }
+        try:
+            memory = SkillsOnlyMemory(**memory_kwargs)
+            mode = memory_kwargs["retrieval_mode"]
+            split = "train" if self.is_train else "val"
+            print(f"[XSkillVisualQAEnvironment] Runtime skill retrieval enabled for {split}: {skills_json_path} ({mode})")
+            return memory
+        except Exception as exc:
+            print(f"[XSkillVisualQAEnvironment] Failed to load skills-only memory from {skills_json_path}: {exc}")
+            return None
 
     def _load_images(self, items: Sequence[Dict[str, Any]]):
         image_arrays = np.empty(len(items), dtype=object)
@@ -258,7 +338,8 @@ class XSkillVisualQAEnvironment:
             return None
         text = _normalize_url(str(image))
         if _is_http_url(text):
-            return text
+            localized = _resolve_remote_image_url(text, self.config)
+            return localized if localized is not None else text
         if text.startswith("file://"):
             parsed = urlparse(text)
             candidate = Path(unquote(parsed.path))
@@ -313,6 +394,7 @@ class XSkillVisualQAEnvironment:
             "benchmark_name": benchmark,
             "data_source": benchmark,
             "solution": item.get("solution", ""),
+            "skill_retrieval": item.get("skill_retrieval", {}),
             "won": 0.0,
             "task_score": 0.0,
             "is_action_valid": True,
@@ -370,6 +452,42 @@ def _resolve_relocated_image(path: Path, config) -> Optional[Path]:
             resolved = root / candidate
             if resolved.is_file():
                 return resolved
+    return None
+
+
+def _resolve_remote_image_url(url: str, config) -> Optional[Path]:
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return None
+    host = parsed.netloc.replace(":", "_")
+    url_path = Path(unquote(parsed.path.lstrip("/")))
+    if not url_path.name:
+        return None
+
+    relative_dir = Path(host) / url_path.parent
+    exact_relative = relative_dir / url_path.name
+    glob_pattern = f"{url_path.stem}_*{url_path.suffix or '.*'}"
+
+    roots: List[Path] = []
+    for root in _candidate_image_roots(config):
+        roots.extend([root, root / "_remote_images", root / "benchmark" / "_remote_images"])
+
+    seen: set[Path] = set()
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        exact = root / exact_relative
+        if exact.is_file():
+            return exact
+        search_dir = root / relative_dir
+        try:
+            matches = sorted(search_dir.glob(glob_pattern))
+        except OSError:
+            matches = []
+        for match in matches:
+            if match.is_file():
+                return match
     return None
 
 

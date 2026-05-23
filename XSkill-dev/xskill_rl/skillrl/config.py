@@ -30,11 +30,11 @@ class SkillRLGRPOConfig:
     enable_dynamic_update: bool = False
     update_threshold: float = 0.4
     max_new_skills: int = 3
-    train_batch_size: int = 64
-    val_batch_size: int = 64
+    train_batch_size: int = 16
+    val_batch_size: int = 16
     group_size: int = 8
     learning_rate: float = 1e-6
-    ppo_mini_batch_size: int = 64
+    ppo_mini_batch_size: int = 16
     ppo_micro_batch_size_per_gpu: int = 4
     log_prob_micro_batch_size_per_gpu: int = 8
     tensor_model_parallel_size: int = 1
@@ -54,6 +54,12 @@ class SkillRLGRPOConfig:
     total_epochs: int = 150
     save_freq: int = 10
     test_freq: int = 5
+    val_before_train: bool = True
+    val_only: bool = False
+    resume_mode: str = "auto"
+    validation_data_dir: Optional[str] = None
+    rollout_data_dir: Optional[str] = None
+    log_val_generations: int = 0
     n_gpus_per_node: int = 8
     nnodes: int = 1
     project_name: str = "xskill_skillrl"
@@ -119,7 +125,15 @@ class SkillRLGRPOConfig:
             f"trainer.save_freq={self.save_freq}",
             f"trainer.test_freq={self.test_freq}",
             f"trainer.total_epochs={self.total_epochs}",
+            f"trainer.val_before_train={str(self.val_before_train)}",
+            f"trainer.val_only={str(self.val_only)}",
+            f"trainer.resume_mode={self.resume_mode}",
+            f"trainer.log_val_generations={self.log_val_generations}",
         ]
+        if self.validation_data_dir:
+            overrides.append(f"trainer.validation_data_dir={self.validation_data_dir}")
+        if self.rollout_data_dir:
+            overrides.append(f"trainer.rollout_data_dir={self.rollout_data_dir}")
 
         if self.actor_ppo_max_token_len_per_gpu is not None:
             overrides.append(

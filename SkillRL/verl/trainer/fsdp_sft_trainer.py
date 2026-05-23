@@ -30,6 +30,7 @@ from contextlib import nullcontext
 import hydra
 import torch
 import torch.distributed
+import transformers
 from peft import LoraConfig, TaskType, get_peft_model
 from tensordict import TensorDict
 from torch import nn, optim
@@ -69,12 +70,46 @@ from verl.workers.sharding_manager.fsdp_ulysses import FSDPUlyssesShardingManage
 
 
 if is_cuda_available:
-    from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
+    try:
+        from flash_attn.bert_padding import pad_input, unpad_input, rearrange, index_first_axis
+    except Exception as exc:
+        pad_input = unpad_input = rearrange = index_first_axis = None
+        logging.getLogger(__file__).warning(
+            "flash_attn padding helpers are unavailable; SFT can still run when remove_padding/SP is disabled: %s",
+            exc,
+        )
 elif is_npu_available:
     from transformers.integrations.npu_flash_attention import pad_input, unpad_input, rearrange, index_first_axis
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_SFT_LOGGING_LEVEL", "WARN"))
+
+
+def _load_sft_model(local_model_path, *, config, torch_dtype, attn_implementation, trust_remote_code):
+    model_kwargs = {
+        "config": config,
+        "torch_dtype": torch_dtype,
+        "attn_implementation": attn_implementation,
+        "trust_remote_code": trust_remote_code,
+    }
+    try:
+        return AutoModelForCausalLM.from_pretrained(local_model_path, **model_kwargs)
+    except ValueError as exc:
+        message = str(exc)
+        if "Qwen3VLConfig" not in message and "Qwen2VLConfig" not in message:
+            raise
+        for class_name in (
+            "AutoModelForImageTextToText",
+            "AutoModelForVision2Seq",
+            "Qwen3VLForConditionalGeneration",
+            "Qwen2VLForConditionalGeneration",
+        ):
+            model_cls = getattr(transformers, class_name, None)
+            if model_cls is None:
+                continue
+            logger.warning("AutoModelForCausalLM cannot load %s; falling back to %s", type(config).__name__, class_name)
+            return model_cls.from_pretrained(local_model_path, **model_kwargs)
+        raise
 
 
 def extract_step(path):
@@ -187,14 +222,20 @@ class FSDPSFTTrainer:
             assert self.use_remove_padding, "Sequence parallel is only supported when remove_padding is enabled"
 
         # This may be very large
-        init_context = get_init_weight_context_manager(use_meta_tensor=not config.tie_word_embeddings, mesh=self.device_mesh)
+        tie_word_embeddings = getattr(
+            config,
+            "tie_word_embeddings",
+            getattr(getattr(config, "text_config", None), "tie_word_embeddings", False),
+        )
+        init_context = get_init_weight_context_manager(use_meta_tensor=not tie_word_embeddings, mesh=self.device_mesh)
 
         with init_context():
-            self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
+            attn_implementation = self.config.model.get("attn_implementation", "sdpa")
+            self.model: PreTrainedModel = _load_sft_model(
                 local_model_path,
                 config=config,
                 torch_dtype=torch.float32,
-                attn_implementation="flash_attention_2",
+                attn_implementation=attn_implementation,
                 trust_remote_code=trust_remote_code,
             )
 
@@ -323,7 +364,7 @@ class FSDPSFTTrainer:
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = labels.contiguous()
                 # Flatten the tokens
-                shift_logits = shift_logits.view(-1, self.model.config.vocab_size)
+                shift_logits = shift_logits.reshape(-1, shift_logits.size(-1))
                 shift_labels = shift_labels.view(-1)
                 # Enable model parallelism
                 shift_labels = shift_labels.to(shift_logits.device)

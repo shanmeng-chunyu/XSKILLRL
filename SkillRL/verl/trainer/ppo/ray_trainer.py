@@ -26,6 +26,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from pprint import pprint
 from typing import Dict, Optional, Type
 
@@ -65,6 +66,30 @@ from gigpo import core_gigpo
 from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
 
 WorkerType = Type[Worker]
+
+
+def _json_safe(value):
+    """Convert training/runtime values to JSON-serializable Python objects."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return _json_safe(value.tolist())
+    if torch.is_tensor(value):
+        detached = value.detach().cpu()
+        if detached.ndim == 0:
+            return _json_safe(detached.item())
+        return _json_safe(detached.tolist())
+    if isinstance(value, Path):
+        return str(value)
+    if OmegaConf.is_config(value):
+        return _json_safe(OmegaConf.to_container(value, resolve=True))
+    if isinstance(value, dict):
+        return {str(_json_safe(k)): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    return str(value)
 
 
 class Role(Enum):
@@ -658,7 +683,7 @@ class RayPPOTrainer:
         with open(filename, "w") as f:
             for i in range(n):
                 entry = {k: v[i] for k, v in base_data.items()}
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                f.write(json.dumps(_json_safe(entry), ensure_ascii=False) + "\n")
 
         print(f"Dumped generations to {filename}")
 
@@ -788,6 +813,19 @@ class RayPPOTrainer:
         data_sources = np.concatenate(data_source_lst, axis=0)
         tool_callings = np.concatenate(tool_calling_list, axis=0)
         traj_uids = np.concatenate(traj_uid_list, axis=0)
+        validation_data_dir = self.config.trainer.get("validation_data_dir", None)
+        if validation_data_dir:
+            self._dump_generations(
+                inputs=sample_inputs,
+                outputs=sample_outputs,
+                scores=sample_scores,
+                reward_extra_infos_dict={
+                    "data_source": data_sources.tolist(),
+                    "tool_calling": tool_callings.tolist(),
+                    "traj_uid": traj_uids.tolist(),
+                },
+                dump_path=validation_data_dir,
+            )
         success_rate = {k: np.mean(v) for k, v in success_rate_dict.items()}
 
         # evaluate test_score based on data source
@@ -876,23 +914,31 @@ class RayPPOTrainer:
 
         # 初始化 SkillUpdater (lazy init, 使用 Azure OpenAI o3)
         if not hasattr(self, 'skill_updater'):
-            from agent_system.memory.skill_updater import SkillUpdater
-            self.skill_updater = SkillUpdater(
-                max_new_skills_per_update=update_config.get('max_new_skills', 3),
-            )
+            try:
+                from agent_system.memory.skill_updater import SkillUpdater
+                self.skill_updater = SkillUpdater(
+                    max_new_skills_per_update=update_config.get('max_new_skills', 3),
+                )
+            except Exception as exc:
+                print(f"[SkillUpdate] SkillUpdater is unavailable, skipping validation skill update: {exc}")
+                return
 
         # 获取当前 skills
-        retrieval_memory = self.val_envs.retrieval_memory
+        retrieval_memory = getattr(self.val_envs, 'retrieval_memory', None)
         if retrieval_memory is None:
             print("[SkillUpdate] No retrieval_memory found in val_envs")
             return
 
         # 分析失败并生成新 skills
         print(f"[SkillUpdate] Analyzing {len(failed_trajectories)} failed trajectories with o3...")
-        new_skills = self.skill_updater.analyze_failures(
-            failed_trajectories=failed_trajectories,
-            current_skills=retrieval_memory.skills,
-        )
+        try:
+            new_skills = self.skill_updater.analyze_failures(
+                failed_trajectories=failed_trajectories,
+                current_skills=retrieval_memory.skills,
+            )
+        except Exception as exc:
+            print(f"[SkillUpdate] Failed to generate new skills, skipping this update: {exc}")
+            return
 
         if new_skills:
             # Add to training envs only.

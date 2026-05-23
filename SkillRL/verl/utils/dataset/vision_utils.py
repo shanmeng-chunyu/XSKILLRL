@@ -16,6 +16,7 @@ from io import BytesIO
 import os
 from pathlib import Path
 from typing import Optional, Union
+from urllib.parse import unquote, urlparse
 
 import torch
 from PIL import Image
@@ -104,9 +105,64 @@ def _resolve_against_roots(raw_path: Path) -> str | None:
     return None
 
 
+def _remote_image_roots() -> list[Path]:
+    roots: list[Path] = []
+    repo_root = os.environ.get("XSKILL_REPO_ROOT")
+    if repo_root:
+        repo_path = Path(repo_root)
+        roots.extend([repo_path / "benchmark" / "_remote_images", repo_path / "_remote_images"])
+
+    for root in _image_roots():
+        roots.extend([root, root / "_remote_images", root / "benchmark" / "_remote_images"])
+    return roots
+
+
+def _resolve_remote_url_to_local(url: str) -> str | None:
+    parsed = urlparse(url)
+    if not parsed.netloc:
+        return None
+
+    host = parsed.netloc.replace(":", "_")
+    url_path = Path(unquote(parsed.path.lstrip("/")))
+    if not url_path.name:
+        return None
+
+    suffix = url_path.suffix
+    stem = url_path.stem
+    relative_dir = Path(host) / url_path.parent
+    exact_relative = relative_dir / url_path.name
+    glob_pattern = f"{stem}_*{suffix or '.*'}"
+
+    seen: set[Path] = set()
+    for root in _remote_image_roots():
+        if root in seen:
+            continue
+        seen.add(root)
+
+        exact_uri = _as_existing_file_uri(root / exact_relative)
+        if exact_uri:
+            return exact_uri
+
+        search_dir = root / relative_dir
+        try:
+            matches = sorted(search_dir.glob(glob_pattern))
+        except OSError:
+            matches = []
+        for match in matches:
+            uri = _as_existing_file_uri(match)
+            if uri:
+                return uri
+
+    return None
+
+
 def _resolve_image_string(image: str) -> str:
     image = _normalize_url(image.strip())
-    if not image or _is_uri(image):
+    if not image:
+        return image
+    if image.startswith(("http://", "https://")):
+        return _resolve_remote_url_to_local(image) or image
+    if _is_uri(image):
         return image
 
     raw_path = Path(image)

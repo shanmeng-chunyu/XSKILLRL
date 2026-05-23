@@ -49,6 +49,8 @@ XSkill-dev/TIR-Bench-main/
 XSkill-dev/benchmark/
 XSkill-dev/benchmark/*/raw/
 XSkill-dev/benchmark/_mixed_protocol/
+images/
+**/images/_remote_images/
 
 # Generated benchmark assets
 XSkill-dev/benchmark/MM-BrowseComp/images/
