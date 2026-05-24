@@ -1,9 +1,4 @@
-"""Prepare text SFT data for the SkillRL/verl SFT trainer.
-
-The shipped SkillRL SFT trainer is text-only.  This exporter therefore uses
-XSkill questions and gold answers to warm-start instruction following,
-answer-format compliance, and optional skill usage before GRPO.
-"""
+"""Prepare multimodal SFT data for the SkillRL/verl SFT trainer."""
 
 from __future__ import annotations
 
@@ -21,6 +16,11 @@ if str(ROOT) not in sys.path:
 from xskill_rl.dataset import load_records_from_spec
 from xskill_rl.skillrl.skill_bank import SkillsOnlyMemory
 from xskill_rl.skillrl.verl_export import DEFAULT_SYSTEM_PROMPT, write_parquet
+
+IMAGE_ONLY_PROMPT = (
+    "Please answer the question shown in the image. Provide the final answer "
+    "using the required answer format."
+)
 
 
 def _as_text(value: Any) -> str:
@@ -159,8 +159,44 @@ def _extract_solution(sample: Dict[str, Any]) -> str:
     return ""
 
 
+def _as_image_list(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        try:
+            return _as_image_list(value.tolist())
+        except Exception:
+            pass
+    if isinstance(value, dict):
+        if "image" in value:
+            return _as_image_list(value.get("image"))
+        for key in ("path", "url"):
+            if value.get(key):
+                return _as_image_list(value.get(key))
+        images: List[Any] = []
+        for item in value.values():
+            images.extend(_as_image_list(item))
+        return images
+    if isinstance(value, (list, tuple)):
+        images = []
+        for item in value:
+            images.extend(_as_image_list(item))
+        return images
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _extract_images(sample: Dict[str, Any]) -> List[Any]:
+    for key in ("images", "image", "image_path", "image_paths"):
+        images = _as_image_list(sample.get(key))
+        if images:
+            return images
+    return []
+
+
 def _build_prompt(sample: Dict[str, Any], memory: SkillsOnlyMemory | None, top_k: int) -> str:
-    problem = _extract_problem(sample)
+    problem = _extract_problem(sample) or IMAGE_ONLY_PROMPT
     system_prompt = DEFAULT_SYSTEM_PROMPT
     if memory is not None:
         retrieval = memory.retrieve(task_description=problem, top_k=top_k, metadata=sample)
@@ -186,6 +222,7 @@ def samples_to_sft_records(
     top_k: int,
     response_format: str,
     max_records: int | None,
+    include_images: bool,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for index, sample in enumerate(samples):
@@ -193,20 +230,27 @@ def samples_to_sft_records(
             break
         problem = _extract_problem(sample)
         solution = _extract_solution(sample)
-        if not problem or not solution:
+        images = _extract_images(sample)
+        if not solution:
             continue
-        records.append(
-            {
-                "prompt": _build_prompt(sample, memory, top_k),
-                "response": _build_response(sample, response_format),
-                "extra_info": {
-                    "index": index,
-                    "doc_id": _as_text(sample.get("doc_id") or sample.get("question_id") or index),
-                    "benchmark_name": _as_text(sample.get("benchmark_name") or sample.get("data_source") or "xskill"),
-                    "has_skill_prompt": memory is not None,
-                },
-            }
-        )
+        if not problem and not images:
+            continue
+        record = {
+            "prompt": _build_prompt(sample, memory, top_k),
+            "response": _build_response(sample, response_format),
+            "extra_info": {
+                "index": index,
+                "doc_id": _as_text(sample.get("doc_id") or sample.get("question_id") or index),
+                "benchmark_name": _as_text(sample.get("benchmark_name") or sample.get("data_source") or "xskill"),
+                "has_skill_prompt": memory is not None,
+                "has_images": bool(images),
+                "num_images": len(images),
+                "image_only_prompt": not bool(problem) and bool(images),
+            },
+        }
+        if include_images:
+            record["images"] = images
+        records.append(record)
     return records
 
 
@@ -222,6 +266,7 @@ def main() -> None:
     parser.add_argument("--task-specific-top-k", type=int, default=None)
     parser.add_argument("--response-format", choices=["answer_tag", "final_answer", "plain"], default="answer_tag")
     parser.add_argument("--max-records", type=int, default=None)
+    parser.add_argument("--include-images", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 
     if not args.input_spec and not args.input_file:
@@ -243,14 +288,17 @@ def main() -> None:
         top_k=args.top_k,
         response_format=args.response_format,
         max_records=args.max_records,
+        include_images=args.include_images,
     )
     if not records:
         raise SystemExit("No SFT records were generated")
 
     write_parquet(args.output_path, records)
     manifest = {
-        "format": "skillrl_sft_text",
+        "format": "skillrl_sft_multimodal" if args.include_images else "skillrl_sft_text",
         "num_records": len(records),
+        "include_images": args.include_images,
+        "num_records_with_images": sum(1 for record in records if record.get("images")),
         "skill_bank": {
             "enabled": memory is not None,
             "skills_json_path": args.skill_bank_json,

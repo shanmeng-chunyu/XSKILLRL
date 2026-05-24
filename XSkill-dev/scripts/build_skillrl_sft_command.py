@@ -36,6 +36,8 @@ def _sft_overrides(args, *, portable: bool) -> list[str]:
         f"data.micro_batch_size_per_gpu={args.micro_batch_size_per_gpu}",
         "data.prompt_key=prompt",
         "data.response_key=response",
+        f"data.image_key={args.image_key}",
+        f"data.enable_multimodal={str(args.enable_multimodal)}",
         "data.prompt_dict_keys=[]",
         "data.response_dict_keys=[]",
         f"data.max_length={args.max_length}",
@@ -73,7 +75,14 @@ def _write_script(target: Path, args) -> None:
         'XSKILL_REPO_ROOT="${XSKILL_REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"',
         'MONOREPO_ROOT="${MONOREPO_ROOT:-$(cd "${XSKILL_REPO_ROOT}/.." && pwd)}"',
         'SKILLRL_REPO_ROOT="${SKILLRL_REPO_ROOT:-${MONOREPO_ROOT}/SkillRL}"',
-        'export XSKILL_REPO_ROOT',
+        'if [[ -z "${XSKILL_IMAGE_ROOT:-}" ]]; then',
+        '  if [[ -d "${MONOREPO_ROOT}/images" ]]; then',
+        '    XSKILL_IMAGE_ROOT="${MONOREPO_ROOT}/images"',
+        "  else",
+        '    XSKILL_IMAGE_ROOT="${XSKILL_REPO_ROOT}"',
+        "  fi",
+        "fi",
+        'export XSKILL_REPO_ROOT XSKILL_IMAGE_ROOT',
         'export PYTHONPATH="${SKILLRL_REPO_ROOT}:${XSKILL_REPO_ROOT}:${PYTHONPATH:-}"',
     ]
     if args.cuda_visible_devices:
@@ -118,6 +127,8 @@ def main() -> None:
     parser.add_argument("--train-batch-size", type=int, default=64)
     parser.add_argument("--micro-batch-size-per-gpu", type=int, default=1)
     parser.add_argument("--max-length", type=int, default=8192)
+    parser.add_argument("--image-key", default="images")
+    parser.add_argument("--enable-multimodal", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--truncation", choices=["error", "left", "right"], default="right")
     parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--total-epochs", type=int, default=1)

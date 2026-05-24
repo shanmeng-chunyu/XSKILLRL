@@ -9,7 +9,7 @@
 | `xskill_rl/skillrl_bridge.py` | 当 `env.use_skills_only_memory=True` 时，每个 rollout/validation 样本按 `problem` 动态检索 SkillBank，并拼接到 prompt。 |
 | GRPO parquet | 推荐导出无 skill prompt 的 parquet，只保存题目、答案、图片和 env kwargs。 |
 | Validation skill update | `trainer.test_freq` 触发 validation 后，如果开启 `env.skills_only_memory.enable_dynamic_update=True`，会从失败 validation trajectory 生成新 skill，加入训练环境的 SkillBank，并保存 `updated_skills_step*.json`。 |
-| SFT | 新增文本 SFT 数据导出与启动脚本生成器，用于先训练输出格式、答案约束和 skill 使用风格。 |
+| SFT | 新增 multimodal SFT 数据导出与启动脚本生成器，用于先训练输出格式、答案约束和 skill 使用风格；默认保留并读取图片。 |
 
 注意：validation 生成的新 skill 默认只加入后续训练环境，不回灌到本轮 validation 环境，避免验证集泄漏。
 
@@ -37,7 +37,7 @@ SkillBank 只在 GRPO 启动脚本生成时传入。
 
 ## 3. 生成 SFT 数据
 
-SFT trainer 当前是文本 SFT，因此不会读取图片。它适合作为冷启动：学习回答格式、最终答案标签、以及如何使用检索到的 skill。
+SFT trainer 当前支持 multimodal SFT：导出的 parquet 默认保留 `images` 字段，训练时通过 Qwen3-VL `AutoProcessor` 读取图片并生成 `pixel_values` / `image_grid_thw`。对于 TIRBench 这类题干主要在图片里的样本，即使文本 `problem` 为空，也会保留图片并使用通用图上答题提示，避免纯文本 SFT 造成“无图无题干 -> 答案”的坏监督。
 
 ```bash
 cd XSkill-dev
@@ -59,6 +59,8 @@ python scripts/prepare_skillrl_sft_dataset.py \
   --response-format answer_tag
 ```
 
+如果需要临时回到纯文本 SFT，可以在导出时加入 `--no-include-images`，并在生成训练脚本时加入 `--no-enable-multimodal`。一般不建议对当前混合视觉 benchmark 使用纯文本 SFT。
+
 ## 4. 生成并运行 SFT 脚本
 
 ```bash
@@ -74,6 +76,7 @@ python scripts/build_skillrl_sft_command.py \
   --train-batch-size 64 \
   --micro-batch-size-per-gpu 1 \
   --max-length 8192 \
+  --enable-multimodal \
   --total-epochs 1 \
   --output-script output/sft_runs/qwen3vl8b_sft.sh
 ```

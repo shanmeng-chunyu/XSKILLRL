@@ -43,6 +43,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 
 import verl.utils.hdfs_io as hdfs_io
 from verl.utils.dataset import SFTDataset
+from verl.utils.dataset.sft_dataset import sft_collate_fn
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.distributed import initialize_global_process_group
@@ -120,12 +121,22 @@ def extract_step(path):
 
 
 class FSDPSFTTrainer:
-    def __init__(self, config, device_mesh: DeviceMesh, ulysses_device_mesh: DeviceMesh, tokenizer, train_dataset: Dataset, val_dataset: Dataset):
+    def __init__(
+        self,
+        config,
+        device_mesh: DeviceMesh,
+        ulysses_device_mesh: DeviceMesh,
+        tokenizer,
+        train_dataset: Dataset,
+        val_dataset: Dataset,
+        processor=None,
+    ):
         self.config = config
         self.device_mesh = device_mesh
         self.ulysses_device_mesh = ulysses_device_mesh
         self.sharding_manager = FSDPUlyssesShardingManager(self.ulysses_device_mesh)
         self.tokenizer = tokenizer
+        self.processor = processor
         if self.config.data.chat_template is not None:
             raise ValueError("Apply Chat template from config is not supported yet.")
 
@@ -188,6 +199,7 @@ class FSDPSFTTrainer:
             num_workers=8,
             pin_memory=True,
             drop_last=True,
+            collate_fn=sft_collate_fn,
         )
 
         self.val_sampler = DistributedSampler(self.val_dataset, shuffle=False, num_replicas=world_size, rank=rank, drop_last=True)
@@ -198,7 +210,20 @@ class FSDPSFTTrainer:
             num_workers=8,
             pin_memory=True,
             drop_last=True,
+            collate_fn=sft_collate_fn,
         )
+
+    def _multimodal_kwargs(self, batch):
+        kwargs = {}
+        if "pixel_values" in batch and "pixel_values_mask" in batch:
+            pixel_values_mask = batch["pixel_values_mask"]
+            if bool(pixel_values_mask.any().item()):
+                kwargs["pixel_values"] = batch["pixel_values"][pixel_values_mask]
+        if "image_grid_thw" in batch and "image_grid_thw_mask" in batch:
+            image_grid_thw_mask = batch["image_grid_thw_mask"]
+            if bool(image_grid_thw_mask.any().item()):
+                kwargs["image_grid_thw"] = batch["image_grid_thw"][image_grid_thw_mask]
+        return kwargs
 
     def _build_model_optimizer(self):
         # TODO (zhangchi.usc1992):
@@ -351,6 +376,9 @@ class FSDPSFTTrainer:
         position_ids = batch["position_ids"].to(self.device_name)
         loss_mask = batch.pop("loss_mask")[:, :-1].reshape(-1).to(self.device_name)
         loss_fct = nn.CrossEntropyLoss(reduction="none")
+        multimodal_kwargs = self._multimodal_kwargs(batch)
+        if multimodal_kwargs and use_sp:
+            raise NotImplementedError("Multimodal SFT does not support remove_padding/sequence parallelism yet.")
 
         # Context manager for sequence parallel if needed
         context = self.sharding_manager if use_sp else nullcontext()
@@ -358,7 +386,13 @@ class FSDPSFTTrainer:
             if not use_sp:
                 # Standard forward pass without sequence parallel
                 labels = input_ids[:, 1:].contiguous()
-                output = self.fsdp_model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False)
+                output = self.fsdp_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    use_cache=False,
+                    **multimodal_kwargs,
+                )
                 logits = output.logits
 
                 shift_logits = logits[..., :-1, :].contiguous()
@@ -505,6 +539,8 @@ class FSDPSFTTrainer:
             if self.device_mesh.get_rank() == 0:
                 os.makedirs(path, exist_ok=True)
                 self.model.save_pretrained(path, state_dict=state_dict)
+                if self.processor is not None:
+                    self.processor.save_pretrained(path)
                 self.tokenizer.save_pretrained(path)
         elif fsdp_strategy == "fsdp2":
             # FSDP2 checkpoint saving
@@ -519,6 +555,8 @@ class FSDPSFTTrainer:
                 os.makedirs(path, exist_ok=True)
                 self.model.save_pretrained(path, state_dict=state_dict)
                 self.model_config.save_pretrained(path)
+                if self.processor is not None:
+                    self.processor.save_pretrained(path)
                 self.tokenizer.save_pretrained(path)
         else:
             raise NotImplementedError(f"not implement {fsdp_strategy}")
@@ -612,19 +650,28 @@ def main(config):
     dp_size = world_size // config.ulysses_sequence_parallel_size
     ulysses_device_mesh = init_device_mesh(device_type=device_name, mesh_shape=(dp_size, config.ulysses_sequence_parallel_size), mesh_dim_names=("dp", "sp"))
     # build tokenizer and datasets first
-    from verl.utils import hf_tokenizer
+    from verl.utils import hf_processor, hf_tokenizer
 
     local_model_path = copy_to_local(src=config.model.partial_pretrain, verbose=True)
     tokenizer = hf_tokenizer(local_model_path, trust_remote_code=config.model.trust_remote_code)
-    train_dataset = create_sft_dataset(config.data.train_files, config.data, tokenizer)
-    val_dataset = create_sft_dataset(config.data.val_files, config.data, tokenizer)
+    processor = hf_processor(local_model_path, trust_remote_code=config.model.trust_remote_code, use_fast=True)
+    train_dataset = create_sft_dataset(config.data.train_files, config.data, tokenizer, processor=processor)
+    val_dataset = create_sft_dataset(config.data.val_files, config.data, tokenizer, processor=processor)
 
-    trainer = FSDPSFTTrainer(config=config, device_mesh=device_mesh, ulysses_device_mesh=ulysses_device_mesh, tokenizer=tokenizer, train_dataset=train_dataset, val_dataset=val_dataset)
+    trainer = FSDPSFTTrainer(
+        config=config,
+        device_mesh=device_mesh,
+        ulysses_device_mesh=ulysses_device_mesh,
+        tokenizer=tokenizer,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        processor=processor,
+    )
 
     trainer.fit()
 
 
-def create_sft_dataset(data_paths, data_config, tokenizer):
+def create_sft_dataset(data_paths, data_config, tokenizer, processor=None):
     """Create a dataset."""
     # build dataset
     # First check if a custom dataset class is specified
@@ -640,7 +687,10 @@ def create_sft_dataset(data_paths, data_config, tokenizer):
         dataset_cls = SFTDataset
 
     # Create datasets based on the selected class
-    dataset = dataset_cls(parquet_files=data_paths, tokenizer=tokenizer, config=data_config)
+    if dataset_cls is SFTDataset:
+        dataset = dataset_cls(parquet_files=data_paths, tokenizer=tokenizer, config=data_config, processor=processor)
+    else:
+        dataset = dataset_cls(parquet_files=data_paths, tokenizer=tokenizer, config=data_config)
     return dataset
 
 
