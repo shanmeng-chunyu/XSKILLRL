@@ -244,6 +244,23 @@ def main() -> None:
     parser.add_argument("--image-root", default=None)
     parser.add_argument("--reward-mode", choices=["contains", "exact"], default="contains")
     parser.add_argument("--env-name", default="xskill_visual")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=20,
+        help="Maximum multi-turn environment steps per rollout. Tool-use rollouts need this > 1.",
+    )
+    parser.add_argument(
+        "--enable-tools",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable XSkill tool execution during SkillRL environment rollouts.",
+    )
+    parser.add_argument(
+        "--enabled-tools",
+        default=None,
+        help="Comma-separated tool allowlist, e.g. web_search,visit,image_search,code_interpreter,zoom.",
+    )
     parser.add_argument("--retrieval-mode", choices=["template", "embedding"], default="template")
     parser.add_argument("--embedding-model-path", default=None)
     parser.add_argument("--top-k", type=int, default=6)
@@ -395,6 +412,9 @@ def main() -> None:
         image_root=image_root,
         reward_mode=args.reward_mode,
         env_name=args.env_name,
+        max_steps=args.max_steps,
+        enable_tools=args.enable_tools,
+        enabled_tools=args.enabled_tools,
         retrieval_mode=args.retrieval_mode,
         embedding_model_path=args.embedding_model_path,
         top_k=args.top_k,

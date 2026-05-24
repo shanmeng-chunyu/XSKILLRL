@@ -23,6 +23,9 @@ class SkillRLGRPOConfig:
     image_root: Optional[str] = None
     reward_mode: str = "contains"
     env_name: str = "xskill_visual"
+    max_steps: int = 20
+    enable_tools: bool = True
+    enabled_tools: Optional[str] = None
     retrieval_mode: str = "template"
     embedding_model_path: Optional[str] = None
     top_k: int = 6
@@ -113,9 +116,10 @@ class SkillRLGRPOConfig:
             ),
             "algorithm.use_kl_in_reward=False",
             f"env.env_name={self.env_name}",
-            "env.max_steps=1",
+            f"env.max_steps={self.max_steps}",
             f"env.rollout.n={self.group_size}",
             f"+env.xskill.reward_mode={self.reward_mode}",
+            f"+env.xskill.enable_tools={str(self.enable_tools)}",
             "trainer.critic_warmup=0",
             f"trainer.logger={self.logger}",
             f"trainer.project_name={self.project_name}",
@@ -188,6 +192,9 @@ class SkillRLGRPOConfig:
             overrides.append(f"+env.xskill.repo_root={self.xskill_repo_root}")
         if self.image_root:
             overrides.append(f"+env.xskill.image_root={self.image_root}")
+        if self.enabled_tools:
+            tools = self.enabled_tools.replace("'", "\\'")
+            overrides.append(f"+env.xskill.enabled_tools='{tools}'")
         if self.default_local_dir:
             overrides.append(f"trainer.default_local_dir={self.default_local_dir}")
         return overrides

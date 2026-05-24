@@ -10,6 +10,7 @@
 | GRPO parquet | 推荐导出无 skill prompt 的 parquet，只保存题目、答案、图片和 env kwargs。 |
 | Validation skill update | `trainer.test_freq` 触发 validation 后，如果开启 `env.skills_only_memory.enable_dynamic_update=True`，会从失败 validation trajectory 生成新 skill，加入训练环境的 SkillBank，并保存 `updated_skills_step*.json`。 |
 | SFT | 新增 multimodal SFT 数据导出与启动脚本生成器，用于先训练输出格式、答案约束和 skill 使用风格；默认保留并读取图片。 |
+| Tool / multi-turn RL | XSkill 环境现在默认开启工具协议和真实工具执行；GRPO 默认 `env.max_steps=20`，模型可在一次 rollout 内多轮调用 `web_search`、`visit`、`image_search`、`code_interpreter`、`zoom`，最后用 `<answer>...</answer>` 作答。 |
 
 注意：validation 生成的新 skill 默认只加入后续训练环境，不回灌到本轮 validation 环境，避免验证集泄漏。
 
@@ -60,6 +61,8 @@ python scripts/prepare_skillrl_sft_dataset.py \
 ```
 
 如果需要临时回到纯文本 SFT，可以在导出时加入 `--no-include-images`，并在生成训练脚本时加入 `--no-enable-multimodal`。一般不建议对当前混合视觉 benchmark 使用纯文本 SFT。
+
+SFT 是离线监督训练，不会像 GRPO rollout 那样在训练中实时执行工具。当前 SFT 导出默认把工具调用协议写入 prompt，让模型学习可用工具格式；如果要做原 SkillRL 那种“工具调用轨迹 SFT”，需要额外把 accumulation/evaluation 轨迹中的 assistant tool call、tool observation 和最终答案导出为监督样本。
 
 ## 4. 生成并运行 SFT 脚本
 
@@ -118,6 +121,9 @@ python scripts/build_skillrl_grpo_command.py \
   --ppo-mini-batch-size 16 \
   --gradient-accumulation-steps 4 \
   --group-size 8 \
+  --max-steps 20 \
+  --enable-tools \
+  --enabled-tools web_search,visit,image_search,code_interpreter,zoom \
   --max-prompt-length 16000 \
   --max-response-length 2048 \
   --rollout-max-model-len 24576 \

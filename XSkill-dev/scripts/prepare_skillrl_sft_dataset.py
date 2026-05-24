@@ -21,6 +21,20 @@ IMAGE_ONLY_PROMPT = (
     "Please answer the question shown in the image. Provide the final answer "
     "using the required answer format."
 )
+TOOL_PROTOCOL = """
+You may use tools when external information, webpage reading, OCR, image inspection, or calculation is needed.
+Call exactly one tool at a time using this format:
+<tool_call>{"name":"web_search","arguments":{"query":"search terms","max_results":5}}</tool_call>
+
+Available tools:
+- web_search: {"query": "...", "max_results": 5}
+- visit: {"url": "https://...", "goal": "what to find"}
+- image_search: {"search_type": "text|reverse", "query": "...", "image_url": "original_image or tool_image_N", "max_results": 5}
+- code_interpreter: {"code": "python code"}
+- zoom: {"code": "python code to crop or inspect images"}
+
+After each tool observation, continue reasoning or call another tool. When ready, give the final answer as <answer>...</answer>.
+""".strip()
 
 
 def _as_text(value: Any) -> str:
@@ -195,7 +209,13 @@ def _extract_images(sample: Dict[str, Any]) -> List[Any]:
     return []
 
 
-def _build_prompt(sample: Dict[str, Any], memory: SkillsOnlyMemory | None, top_k: int) -> str:
+def _build_prompt(
+    sample: Dict[str, Any],
+    memory: SkillsOnlyMemory | None,
+    top_k: int,
+    *,
+    enable_tools: bool,
+) -> str:
     problem = _extract_problem(sample) or IMAGE_ONLY_PROMPT
     system_prompt = DEFAULT_SYSTEM_PROMPT
     if memory is not None:
@@ -203,6 +223,8 @@ def _build_prompt(sample: Dict[str, Any], memory: SkillsOnlyMemory | None, top_k
         skill_text = memory.format_for_prompt(retrieval)
         if skill_text and skill_text != "No relevant skills found for this task.":
             system_prompt = f"{system_prompt}\n\n## Retrieved Relevant Experience\n{skill_text}"
+    if enable_tools:
+        system_prompt = f"{system_prompt}\n\n## Tool Protocol\n{TOOL_PROTOCOL}"
     return f"SYSTEM:\n{system_prompt}\n\nUSER:\n{problem}"
 
 
@@ -223,6 +245,7 @@ def samples_to_sft_records(
     response_format: str,
     max_records: int | None,
     include_images: bool,
+    enable_tools: bool,
 ) -> List[Dict[str, Any]]:
     records: List[Dict[str, Any]] = []
     for index, sample in enumerate(samples):
@@ -236,7 +259,7 @@ def samples_to_sft_records(
         if not problem and not images:
             continue
         record = {
-            "prompt": _build_prompt(sample, memory, top_k),
+            "prompt": _build_prompt(sample, memory, top_k, enable_tools=enable_tools),
             "response": _build_response(sample, response_format),
             "extra_info": {
                 "index": index,
@@ -246,6 +269,7 @@ def samples_to_sft_records(
                 "has_images": bool(images),
                 "num_images": len(images),
                 "image_only_prompt": not bool(problem) and bool(images),
+                "tool_protocol": bool(enable_tools),
             },
         }
         if include_images:
@@ -255,7 +279,7 @@ def samples_to_sft_records(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prepare SkillRL/verl text SFT parquet data from XSkill samples.")
+    parser = argparse.ArgumentParser(description="Prepare SkillRL/verl multimodal SFT parquet data from XSkill samples.")
     parser.add_argument("--input-spec", action="append", default=[])
     parser.add_argument("--input-file", action="append", default=[])
     parser.add_argument("--output-path", required=True)
@@ -267,6 +291,12 @@ def main() -> None:
     parser.add_argument("--response-format", choices=["answer_tag", "final_answer", "plain"], default="answer_tag")
     parser.add_argument("--max-records", type=int, default=None)
     parser.add_argument("--include-images", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--enable-tools",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include the XSkill tool-call protocol in SFT prompts.",
+    )
     args = parser.parse_args()
 
     if not args.input_spec and not args.input_file:
@@ -289,6 +319,7 @@ def main() -> None:
         response_format=args.response_format,
         max_records=args.max_records,
         include_images=args.include_images,
+        enable_tools=args.enable_tools,
     )
     if not records:
         raise SystemExit("No SFT records were generated")
@@ -298,6 +329,7 @@ def main() -> None:
         "format": "skillrl_sft_multimodal" if args.include_images else "skillrl_sft_text",
         "num_records": len(records),
         "include_images": args.include_images,
+        "tool_protocol": args.enable_tools,
         "num_records_with_images": sum(1 for record in records if record.get("images")),
         "skill_bank": {
             "enabled": memory is not None,

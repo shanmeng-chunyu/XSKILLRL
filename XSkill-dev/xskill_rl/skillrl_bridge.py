@@ -11,6 +11,9 @@ import json
 import os
 import re
 import ast
+import sys
+import uuid
+from types import SimpleNamespace
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -25,6 +28,21 @@ DEFAULT_SYSTEM_PROMPT = (
     "the final answer."
 )
 SKILL_SECTION_TITLE = "## Retrieved Relevant Experience"
+DEFAULT_TOOLS = ["web_search", "visit", "image_search", "code_interpreter", "zoom"]
+TOOL_PROTOCOL = """
+You may use tools when external information, webpage reading, OCR, image inspection, or calculation is needed.
+Call exactly one tool at a time using this format:
+<tool_call>{"name":"web_search","arguments":{"query":"search terms","max_results":5}}</tool_call>
+
+Available tools:
+- web_search: {"query": "...", "max_results": 5}
+- visit: {"url": "https://...", "goal": "what to find"}
+- image_search: {"search_type": "text|reverse", "query": "...", "image_url": "original_image or tool_image_N", "max_results": 5}
+- code_interpreter: {"code": "python code"}
+- zoom: {"code": "python code to crop or inspect images"}
+
+After each tool observation, continue reasoning or call another tool. When ready, give the final answer as <answer>...</answer>.
+""".strip()
 
 
 def make_xskill_envs_from_skillrl(config):
@@ -36,18 +54,14 @@ def make_xskill_envs_from_skillrl(config):
 
 
 class XSkillVisualQAEnvironment:
-    """Single-step visual QA environment for GRPO rollouts.
-
-    Each rollout sample is one episode.  The model receives the current sample
-    prompt, returns one response, and gets a binary reward from the configured
-    answer matcher.
-    """
+    """Multi-turn XSkill visual QA environment for SkillRL rollouts."""
 
     def __init__(self, config, *, is_train: bool) -> None:
         self.config = config
         self.is_train = is_train
         self.cursor = 0
         self.current_items: List[Dict[str, Any]] = []
+        self.episode_states: List[Dict[str, Any]] = []
         self.retrieval_memory = self._init_retrieval_memory()
         self.samples = self._load_samples_from_config()
 
@@ -56,6 +70,7 @@ class XSkillVisualQAEnvironment:
         if not items:
             items = self._next_items_from_dataset()
         self.current_items = items
+        self.episode_states = [self._new_episode_state(item, idx) for idx, item in enumerate(items)]
         observations = {
             "text": [self._prompt_text(item) for item in items],
             "image": self._load_images(items),
@@ -68,26 +83,89 @@ class XSkillVisualQAEnvironment:
         rewards = []
         dones = []
         infos = []
-        for item, action in zip(self.current_items, text_actions):
-            reward = self._score(action, item.get("solution", ""))
-            rewards.append(reward)
-            dones.append(True)
+        next_texts = []
+        next_images = np.empty(len(self.current_items), dtype=object)
+        has_next_images = False
+
+        for idx, (item, action) in enumerate(zip(self.current_items, text_actions)):
+            state = self.episode_states[idx]
+            if state.get("done"):
+                info = self._base_info(item)
+                info.update(
+                    {
+                        "won": 0.0,
+                        "task_score": 0.0,
+                        "response": "",
+                        "parsed_action_type": "finished",
+                        "ground_truth": item.get("solution", ""),
+                        "is_action_valid": True,
+                        "tool_calling": 0.0,
+                    }
+                )
+                rewards.append(0.0)
+                dones.append(True)
+                next_texts.append("Episode finished.")
+                next_images[idx] = None
+                infos.append(info)
+                continue
+
+            state["step"] += 1
             info = self._base_info(item)
+            parsed = self._parse_model_action(action)
+            reward = 0.0
+            done = False
+            tool_calling = 0.0
+            next_text = "Episode finished."
+            returned_images = []
+
+            if parsed["type"] == "tool_call" and self._tools_enabled():
+                tool_calling = 1.0
+                tool_result = self._execute_tool_call(parsed["name"], parsed["arguments"], state)
+                returned_images = tool_result.get("images", [])
+                next_text = self._build_followup_observation(
+                    item,
+                    action=action,
+                    observation=tool_result.get("observation", ""),
+                    step=state["step"],
+                )
+            else:
+                response = parsed.get("answer", action)
+                reward = self._score(response, item.get("solution", ""))
+                done = True
+
+            if state["step"] >= int(_cfg_get(self.config.env, "max_steps", 1)):
+                if not done:
+                    reward = self._score(action, item.get("solution", ""))
+                    done = True
+                    next_text = "Episode finished: maximum interaction steps reached."
+            state["done"] = bool(done)
+
             info.update(
                 {
                     "won": float(reward),
                     "task_score": float(reward),
                     "response": action,
+                    "parsed_action_type": parsed["type"],
                     "ground_truth": item.get("solution", ""),
-                    "is_action_valid": True,
-                    "tool_calling": 0.0,
+                    "is_action_valid": parsed["type"] != "invalid",
+                    "tool_calling": float(tool_calling),
                 }
             )
+            if parsed["type"] == "tool_call":
+                info["tool_name"] = parsed.get("name", "")
+            rewards.append(reward)
+            dones.append(done)
+            next_texts.append(next_text)
+            if returned_images:
+                next_images[idx] = returned_images
+                has_next_images = True
+            else:
+                next_images[idx] = None
             infos.append(info)
 
         observations = {
-            "text": ["Episode finished." for _ in self.current_items],
-            "image": None,
+            "text": next_texts,
+            "image": next_images if has_next_images else None,
             "anchor": np.array([item.get("doc_id", str(i)) for i, item in enumerate(self.current_items)], dtype=object),
         }
         return (
@@ -195,16 +273,25 @@ class XSkillVisualQAEnvironment:
             return self._runtime_skill_prompt(item)
 
         prompt = item.get("prompt")
+        tool_section = f"\n\n## Tool Protocol\n{TOOL_PROTOCOL}" if self._tools_enabled() else ""
         if isinstance(prompt, list):
             lines = []
             for message in prompt:
                 role = message.get("role", "user")
                 content = message.get("content", "")
                 lines.append(f"{role.upper()}:\n{content}")
-            return "\n\n".join(lines)
+            text = "\n\n".join(lines)
+            if self._tools_enabled() and "Tool Protocol" not in text:
+                text = f"SYSTEM:\n{DEFAULT_SYSTEM_PROMPT}{tool_section}\n\n{text}"
+            return text
         if isinstance(prompt, str) and prompt:
+            if self._tools_enabled() and "Tool Protocol" not in prompt:
+                return f"SYSTEM:\n{DEFAULT_SYSTEM_PROMPT}{tool_section}\n\nUSER:\n{prompt}"
             return prompt
-        return str(item.get("problem", ""))
+        problem = str(item.get("problem", ""))
+        if self._tools_enabled():
+            return f"SYSTEM:\n{DEFAULT_SYSTEM_PROMPT}{tool_section}\n\nUSER:\n{problem}"
+        return problem
 
     def _runtime_skill_prompt(self, item: Dict[str, Any]) -> str:
         """Build the prompt from the current SkillBank at rollout time.
@@ -240,7 +327,191 @@ class XSkillVisualQAEnvironment:
         system_prompt = _cfg_get(_cfg_get(self.config.env, "xskill", {}), "system_prompt", DEFAULT_SYSTEM_PROMPT)
         if skill_text and skill_text != "No relevant skills found for this task.":
             system_prompt = f"{system_prompt}\n\n{SKILL_SECTION_TITLE}\n{skill_text}"
+        if self._tools_enabled():
+            system_prompt = f"{system_prompt}\n\n## Tool Protocol\n{TOOL_PROTOCOL}"
         return f"SYSTEM:\n{system_prompt}\n\nUSER:\n{problem}"
+
+    def _tools_enabled(self) -> bool:
+        xskill_cfg = _cfg_get(self.config.env, "xskill", {})
+        return bool(_cfg_get(xskill_cfg, "enable_tools", True))
+
+    def _enabled_tool_names(self) -> List[str]:
+        xskill_cfg = _cfg_get(self.config.env, "xskill", {})
+        configured = _cfg_get(xskill_cfg, "enabled_tools", None) or os.environ.get("ENABLED_TOOLS")
+        if configured:
+            if isinstance(configured, str):
+                return [name.strip() for name in configured.split(",") if name.strip()]
+            if isinstance(configured, (list, tuple)):
+                return [str(name).strip() for name in configured if str(name).strip()]
+        return list(DEFAULT_TOOLS)
+
+    def _parse_model_action(self, action: str) -> Dict[str, Any]:
+        text = str(action or "").strip()
+        answer_match = re.search(r"<answer>(.*?)</answer>", text, flags=re.IGNORECASE | re.DOTALL)
+        if answer_match:
+            return {"type": "answer", "answer": answer_match.group(1).strip()}
+
+        for pattern in [
+            r"<tool_call>(.*?)</tool_call>",
+            r"<tool>(.*?)</tool>",
+            r"```(?:json)?\s*(\{.*?\"(?:name|tool_name)\".*?\})\s*```",
+        ]:
+            match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+            if match:
+                parsed = self._parse_tool_payload(match.group(1))
+                if parsed:
+                    return parsed
+
+        action_match = re.search(r"Action\s*:\s*([a-zA-Z_][\w]*)\s*(?:\((.*?)\)|\{(.*?)\})", text, flags=re.DOTALL)
+        if action_match:
+            name = action_match.group(1)
+            raw_args = action_match.group(2) if action_match.group(2) is not None else "{" + action_match.group(3) + "}"
+            return {"type": "tool_call", "name": name, "arguments": self._parse_arguments(raw_args)}
+
+        if re.search(r"\b(final answer|answer)\s*(?::|\uff1a)", text, flags=re.IGNORECASE):
+            return {"type": "answer", "answer": _extract_answer(text)}
+        return {"type": "answer", "answer": text}
+
+    def _parse_tool_payload(self, payload: str) -> Optional[Dict[str, Any]]:
+        payload = payload.strip()
+        try:
+            data = json.loads(payload)
+        except Exception:
+            try:
+                data = ast.literal_eval(payload)
+            except Exception:
+                return None
+        if not isinstance(data, dict):
+            return None
+        name = data.get("name") or data.get("tool_name") or data.get("tool")
+        arguments = data.get("arguments") or data.get("parameters") or data.get("args") or {}
+        if isinstance(arguments, str):
+            arguments = self._parse_arguments(arguments)
+        if not isinstance(arguments, dict):
+            arguments = {"input": arguments}
+        if not name:
+            return None
+        return {"type": "tool_call", "name": str(name), "arguments": arguments}
+
+    def _parse_arguments(self, raw_args: str) -> Dict[str, Any]:
+        raw_args = str(raw_args or "").strip()
+        if not raw_args:
+            return {}
+        try:
+            value = json.loads(raw_args)
+        except Exception:
+            try:
+                value = ast.literal_eval(raw_args)
+            except Exception:
+                return {"query": raw_args}
+        return value if isinstance(value, dict) else {"input": value}
+
+    def _new_episode_state(self, item: Dict[str, Any], index: int) -> Dict[str, Any]:
+        node = SimpleNamespace(
+            node_id=str(item.get("doc_id") or index),
+            image_map={},
+            conversation_history=[],
+            api_conversation_history=[],
+            current_token_count=0,
+        )
+        for image_idx, image in enumerate(self._load_pil_images(item)):
+            key = "original_image" if image_idx == 0 else f"original_image_{image_idx}"
+            node.image_map[key] = image
+        save_dir = self._tool_save_dir(item, index)
+        return {
+            "step": 0,
+            "done": False,
+            "node": node,
+            "tool_handler": self._build_tool_handler(save_dir),
+            "save_dir": save_dir,
+        }
+
+    def _tool_save_dir(self, item: Dict[str, Any], index: int) -> str:
+        xskill_cfg = _cfg_get(self.config.env, "xskill", {})
+        configured = _cfg_get(xskill_cfg, "tool_save_dir", None)
+        if configured:
+            root = Path(str(configured))
+        else:
+            repo_root = os.environ.get("XSKILL_REPO_ROOT") or _cfg_get(xskill_cfg, "repo_root", ".")
+            root = Path(str(repo_root)) / "output" / "skillrl_tool_runs"
+        split = "train" if self.is_train else "val"
+        doc_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(item.get("doc_id") or index))[:80]
+        path = root / split / f"{doc_id}_{uuid.uuid4().hex[:8]}"
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+
+    def _build_tool_handler(self, save_dir: str):
+        self._ensure_eval_imports()
+        try:
+            from engine.api_tool_handler import APIToolHandler
+        except Exception as exc:
+            print(f"[XSkillVisualQAEnvironment] Could not import APIToolHandler: {exc}")
+            return None
+        xskill_cfg = _cfg_get(self.config.env, "xskill", {})
+        args = SimpleNamespace(
+            max_pixels=int(_cfg_get(xskill_cfg, "tool_max_pixels", 1024 * 1024)),
+            min_pixels=int(_cfg_get(xskill_cfg, "tool_min_pixels", 128 * 128)),
+            image_search_max_calls=int(_cfg_get(xskill_cfg, "image_search_max_calls", 3)),
+            web_search_max_calls=int(_cfg_get(xskill_cfg, "web_search_max_calls", 5)),
+            tool_configs={},
+        )
+        return APIToolHandler(args=args, save_dir=save_dir)
+
+    def _ensure_eval_imports(self) -> None:
+        repo_root = _cfg_get(_cfg_get(self.config.env, "xskill", {}), "repo_root", None) or os.environ.get("XSKILL_REPO_ROOT")
+        if not repo_root:
+            return
+        eval_root = str(Path(str(repo_root)) / "eval")
+        for path in (str(repo_root), eval_root):
+            if path not in sys.path:
+                sys.path.insert(0, path)
+
+    def _execute_tool_call(self, tool_name: str, arguments: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
+        handler = state.get("tool_handler")
+        if handler is None:
+            return {"observation": "Tool execution is unavailable in this environment.", "images": []}
+        enabled_tools = self._enabled_tool_names()
+        if tool_name not in enabled_tools:
+            return {"observation": f"Tool '{tool_name}' is not enabled. Enabled tools: {', '.join(enabled_tools)}", "images": []}
+        try:
+            result = handler.execute_tool_call(
+                tool_name=tool_name,
+                parameters=dict(arguments or {}),
+                node=state["node"],
+                turn_idx=int(state.get("step", 0)),
+                tool_call_id=f"call_{state.get('step', 0)}",
+            )
+            observation = result.get("processed_result") or result.get("tool_result") or ""
+            images = [np.asarray(image.convert("RGB")) for _, image in result.get("new_images", [])]
+            return {"observation": str(observation), "images": images}
+        except Exception as exc:
+            return {"observation": f"Tool execution failed for {tool_name}: {exc}", "images": []}
+
+    def _build_followup_observation(self, item: Dict[str, Any], *, action: str, observation: str, step: int) -> str:
+        max_steps = int(_cfg_get(self.config.env, "max_steps", 1))
+        return (
+            f"Previous assistant message:\n{action}\n\n"
+            f"Tool observation:\n{observation}\n\n"
+            f"Step {step}/{max_steps}. Continue reasoning, call another tool if needed, "
+            "or provide the final answer as <answer>...</answer>."
+        )
+
+    def _load_pil_images(self, item: Dict[str, Any]) -> List[Any]:
+        try:
+            from PIL import Image
+        except Exception:
+            return []
+        images = []
+        for image_path in self._resolve_image_paths(item):
+            try:
+                if _is_http_url(image_path):
+                    image = self._load_remote_image(str(image_path), Image)
+                else:
+                    image = Image.open(image_path).convert("RGB")
+                images.append(image)
+            except Exception:
+                continue
+        return images
 
     def _init_retrieval_memory(self):
         if not bool(_cfg_get(self.config.env, "use_skills_only_memory", False)):
