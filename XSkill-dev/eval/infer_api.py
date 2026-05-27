@@ -613,13 +613,7 @@ def main(args):
         
         question_id, sample_dir = get_sample_metadata(sample, sample_idx, sample_args.output_dir)
         os.makedirs(sample_dir, exist_ok=True)
-        
-        retrieve_experiences_for_sample(
-            sample, sample_args, experience_retriever, BASE_SYSTEM_PROMPT,
-            question_id, sample_dir,
-            update_global_prompts=True
-        )
-        
+
         # Check if sample is already completed (skip if --skip-completed is set)
         completed_info = check_sample_completed(sample_dir, sample_args)
         if completed_info:
@@ -629,8 +623,15 @@ def main(args):
                 'sample_idx': sample_idx,
                 'question_id': question_id,
                 'sample_dir': sample_dir,
-                'sample_rollout_results': completed_info.get('sample_rollout_results', [])
+                'sample_rollout_results': completed_info.get('sample_rollout_results', []),
+                'skipped_completed': True,
             }
+
+        retrieve_experiences_for_sample(
+            sample, sample_args, experience_retriever, BASE_SYSTEM_PROMPT,
+            question_id, sample_dir,
+            update_global_prompts=True
+        )
         
         sample_rollout_results = []
         
@@ -698,7 +699,8 @@ def main(args):
                         'results': [],
                         'sample': sample,
                         'question_id': question_id,
-                        'sample_dir': sample_dir
+                        'sample_dir': sample_dir,
+                        'skipped_completed': False
                     }
                 
                 # Execute pipeline parallel processing
@@ -721,6 +723,9 @@ def main(args):
                         sample_info = batch_sample_results[actual_sample_idx]
                         if not sample_info['results']:
                             print(f"  [Large Batch] Skipping {sample_info['question_id']} for experience generation: no successful rollouts")
+                            continue
+                        if sample_info.get('skipped_completed'):
+                            print(f"  [Large Batch] Skipping {sample_info['question_id']} for experience generation: already completed")
                             continue
                         sample_info_dict = {
                             'sample': sample_info['sample'],
@@ -758,7 +763,8 @@ def main(args):
                     'results': [],
                     'sample': sample,
                     'question_id': question_id,
-                    'sample_dir': sample_dir
+                    'sample_dir': sample_dir,
+                    'skipped_completed': False
                 }
             
             execute_pipeline_parallel_processing(
@@ -806,7 +812,8 @@ def main(args):
                             sample_info = future.result()
                             if sample_info and sample_info.get('sample_rollout_results'):
                                 all_results.extend(sample_info['sample_rollout_results'])
-                                batch_sample_infos.append(sample_info)
+                                if not sample_info.get('skipped_completed'):
+                                    batch_sample_infos.append(sample_info)
                         except Exception as e:
                             print(f"  Error processing sample {actual_idx}: {e}")
                 
@@ -841,6 +848,8 @@ def main(args):
                         sample_info = future.result()
                         if sample_info and sample_info.get('sample_rollout_results'):
                             all_results.extend(sample_info['sample_rollout_results'])
+                            if sample_info.get('skipped_completed'):
+                                continue
                     except Exception as e:
                         print(f"  Error processing sample {sample_idx}: {e}")
     
@@ -850,7 +859,7 @@ def main(args):
             sample_info = process_single_sample_with_experience(sample, sample_idx)
             if sample_info and sample_info.get('sample_rollout_results'):
                 all_results.extend(sample_info['sample_rollout_results'])
-                if use_experience_batching:
+                if use_experience_batching and not sample_info.get('skipped_completed'):
                     large_batch_queue.append(sample_info)
                     if len(large_batch_queue) >= args.experience_samples_per_large_batch:
                         process_large_batch_experiences(large_batch_queue, args, batch_idx=large_batch_idx)

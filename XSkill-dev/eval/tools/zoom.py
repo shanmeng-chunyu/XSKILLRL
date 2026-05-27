@@ -43,22 +43,48 @@ app.launch_new_instance()
 """
 
 
+def _shutdown_kernel_client(client):
+    """Best-effort shutdown for Jupyter clients across jupyter_client versions."""
+    for method_name in ('stop_channels', 'shutdown', 'close'):
+        method = getattr(client, method_name, None)
+        if callable(method):
+            try:
+                method()
+            except Exception:
+                pass
+
+
+def _terminate_subprocess(proc, timeout: float = 3.0):
+    """Terminate a subprocess and wait so its file descriptors are released."""
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=timeout)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 def _kill_kernels_and_subprocesses(_sig_num=None, _frame=None):
     """Clean up all kernels and subprocesses."""
     with _KERNEL_LOCK:
-        for v in list(_KERNEL_CLIENTS.values()):
-            try:
-                v.shutdown()
-            except:
-                pass
+        clients = list(_KERNEL_CLIENTS.values())
         _KERNEL_CLIENTS.clear()
-        
-        for v in list(_MISC_SUBPROCESSES.values()):
-            try:
-                v.terminate()
-            except:
-                pass
+
+        processes = list(_MISC_SUBPROCESSES.values())
         _MISC_SUBPROCESSES.clear()
+
+    for client in clients:
+        _shutdown_kernel_client(client)
+
+    for proc in processes:
+        _terminate_subprocess(proc)
 
 
 # Register cleanup function
@@ -401,11 +427,8 @@ How to Zoom:
                         # Another thread has already created, use existing one
                         kc = _KERNEL_CLIENTS[kernel_id]
                         # Close recently created kernel (to avoid resource leak)
-                        try:
-                            new_kc.shutdown()
-                            new_subproc.terminate()
-                        except Exception:
-                            pass
+                        _shutdown_kernel_client(new_kc)
+                        _terminate_subprocess(new_subproc)
             
             # Execute code
             full_code += '\n\n'  # Ensure code ends with a newline
@@ -479,10 +502,7 @@ How to Zoom:
         if not os.path.isfile(connection_file):
             error_msg = f"Kernel connection file not created after {max_wait}s"
             print(f"[ZoomTool] ERROR - {error_msg}")
-            try:
-                kernel_process.terminate()
-            except:
-                pass
+            _terminate_subprocess(kernel_process)
             raise RuntimeError(error_msg)
         
         # Wait for file to be readable
@@ -497,10 +517,7 @@ How to Zoom:
                 if wait_time >= max_wait:
                     error_msg = f"Connection file not readable after {max_wait}s: {e}"
                     print(f"[ZoomTool] ERROR - {error_msg}")
-                    try:
-                        kernel_process.terminate()
-                    except:
-                        pass
+                    _terminate_subprocess(kernel_process)
                     raise RuntimeError(error_msg)
         
         # Create client
@@ -508,10 +525,7 @@ How to Zoom:
             kc = BlockingKernelClient(connection_file=connection_file)
         except Exception as e:
             print(f"[ZoomTool] ERROR - Failed to create BlockingKernelClient: {e}")
-            try:
-                kernel_process.terminate()
-            except:
-                pass
+            _terminate_subprocess(kernel_process)
             raise
         
         # Set event loop policy (for compatibility)
@@ -528,11 +542,8 @@ How to Zoom:
             print(f"[ZoomTool] ERROR - Failed to initialize kernel client: {e}")
             import traceback
             traceback.print_exc()
-            try:
-                kc.shutdown()
-                kernel_process.terminate()
-            except:
-                pass
+            _shutdown_kernel_client(kc)
+            _terminate_subprocess(kernel_process)
             raise
         
         return kc, kernel_process
@@ -633,16 +644,16 @@ How to Zoom:
         # Method 3: Clean kernel references in global dictionary (ensure kernel is recreated on next call)
         try:
             with _KERNEL_LOCK:
-                if kernel_id in _KERNEL_CLIENTS:
-                    try:
-                        _KERNEL_CLIENTS[kernel_id].shutdown()
-                    except:
-                        pass
-                    del _KERNEL_CLIENTS[kernel_id]
+                client = _KERNEL_CLIENTS.pop(kernel_id, None)
+                proc = _MISC_SUBPROCESSES.pop(kernel_id, None)
+                if client is not None:
                     print(f"[ZoomTool] Kernel client removed from cache")
-                if kernel_id in _MISC_SUBPROCESSES:
-                    del _MISC_SUBPROCESSES[kernel_id]
+                if proc is not None:
                     print(f"[ZoomTool] Kernel process removed from cache")
+            if client is not None:
+                _shutdown_kernel_client(client)
+            if proc is not None:
+                _terminate_subprocess(proc)
         except Exception as e:
             print(f"[ZoomTool] Failed to cleanup kernel references: {e}")
     
@@ -844,29 +855,45 @@ How to Zoom:
         
         png_bytes = base64.b64decode(image_base64)
         bytes_io = io.BytesIO(png_bytes)
-        Image.open(bytes_io).save(local_image_file, 'png')
+        with Image.open(bytes_io) as image:
+            image.save(local_image_file, 'png')
         
         return local_image_file
+
+    def close(self):
+        """Release all kernels started by this tool instance, regardless of worker thread."""
+        kernel_prefix = f'{self.instance_id}_'
+        with _KERNEL_LOCK:
+            client_items = [
+                (kernel_id, client)
+                for kernel_id, client in list(_KERNEL_CLIENTS.items())
+                if kernel_id.startswith(kernel_prefix)
+            ]
+            process_items = [
+                (kernel_id, proc)
+                for kernel_id, proc in list(_MISC_SUBPROCESSES.items())
+                if kernel_id.startswith(kernel_prefix)
+            ]
+            for kernel_id, _ in client_items:
+                _KERNEL_CLIENTS.pop(kernel_id, None)
+            for kernel_id, _ in process_items:
+                _MISC_SUBPROCESSES.pop(kernel_id, None)
+
+        for _, client in client_items:
+            _shutdown_kernel_client(client)
+        for _, proc in process_items:
+            _terminate_subprocess(proc)
+
+        if client_items or process_items:
+            print(
+                f"[ZoomTool] Closed {len(client_items)} kernel clients "
+                f"and {len(process_items)} kernel processes for instance {self.instance_id}"
+            )
     
     def __del__(self):
         """Clean up resources."""
-        # Clean up kernel for this instance in current thread
         try:
-            kernel_id = self._get_kernel_id()
-            
-            with _KERNEL_LOCK:
-                if kernel_id in _KERNEL_CLIENTS:
-                    try:
-                        _KERNEL_CLIENTS[kernel_id].shutdown()
-                    except:
-                        pass
-                    del _KERNEL_CLIENTS[kernel_id]
-                if kernel_id in _MISC_SUBPROCESSES:
-                    try:
-                        _MISC_SUBPROCESSES[kernel_id].terminate()
-                    except:
-                        pass
-                    del _MISC_SUBPROCESSES[kernel_id]
+            self.close()
         except:
             # Ignore all errors to avoid exceptions during destruction
             pass

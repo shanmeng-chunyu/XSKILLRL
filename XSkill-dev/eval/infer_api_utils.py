@@ -23,6 +23,76 @@ SAMPLE_SUMMARY_FILENAME = "metrics_sample.json"
 DATASET_SUMMARY_FILENAME = "metrics_at_k.json"
 
 
+def _trajectory_has_turn(traj_file: str) -> bool:
+    """Return True when a trajectory file has at least one recorded turn."""
+    if not os.path.exists(traj_file):
+        return False
+    try:
+        with open(traj_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    traj_data = json.loads(line)
+                    if traj_data.get('turn_idx') is not None:
+                        return True
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.debug(f"Error parsing trajectory line: {e}")
+    except Exception as e:
+        logger.debug(f"Error reading trajectory file: {e}")
+    return False
+
+
+def _count_trajectory_turns(traj_file: str) -> int:
+    """Count turns from traj.jsonl by max turn_idx + 1."""
+    max_turn_idx = -1
+    if not os.path.exists(traj_file):
+        return 0
+    try:
+        with open(traj_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    traj_data = json.loads(line)
+                    turn_idx = traj_data.get('turn_idx')
+                    if turn_idx is not None and turn_idx > max_turn_idx:
+                        max_turn_idx = turn_idx
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.debug(f"Error parsing trajectory line: {e}")
+    except Exception as e:
+        logger.debug(f"Error reading trajectory file for turn count: {e}")
+    return max_turn_idx + 1 if max_turn_idx >= 0 else 0
+
+
+def _load_completed_rollout_result(rollout_dir: str, question_id: str, rollout_idx: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Load a lightweight result for a completed rollout so summaries remain correct when skipping."""
+    traj_file = os.path.join(rollout_dir, 'traj.jsonl')
+    metrics_file = os.path.join(rollout_dir, 'metrics.json')
+    if not (os.path.exists(metrics_file) and _trajectory_has_turn(traj_file)):
+        return None
+    try:
+        with open(metrics_file, 'r', encoding='utf-8') as f:
+            metrics = json.load(f)
+    except Exception as e:
+        logger.debug(f"Error loading existing metrics from {metrics_file}: {e}")
+        return None
+
+    num_turns = _count_trajectory_turns(traj_file)
+    result = {
+        'question_id': question_id,
+        'accuracy_score': metrics.get('accuracy_score', 0.0),
+        'trajectory_score': metrics.get('trajectory_score'),
+        'trajectory_analysis': metrics.get('trajectory_analysis'),
+        'final_answer': metrics.get('final_answer'),
+        'ground_truth': metrics.get('ground_truth'),
+        'conversation_history': [{"role": "assistant", "content": ""} for _ in range(num_turns)] if num_turns > 0 else [],
+    }
+    if rollout_idx is not None:
+        result['_rollout_idx'] = rollout_idx
+    return result
+
+
 def initialize_experience_retriever(args):
     """
     Initialize experience retriever if retrieval mode is enabled.
@@ -514,7 +584,10 @@ def compute_and_save_sample_summary(question_id, sample_rollout_results, rollout
 
 def check_sample_completed(sample_dir, args):
     """
-    Check if a sample is already completed (has traj.jsonl with turn_idx and metrics.json).
+    Check if a sample is already completed.
+
+    Single-rollout runs are complete when sample_dir has traj.jsonl and metrics.json.
+    Multi-rollout runs are complete only when every rollout_N directory has both files.
     
     Args:
         sample_dir: Sample directory path
@@ -525,73 +598,29 @@ def check_sample_completed(sample_dir, args):
     """
     if not getattr(args, 'skip_completed', False):
         return None
-    
-    traj_file = os.path.join(sample_dir, 'traj.jsonl')
-    metrics_file = os.path.join(sample_dir, 'metrics.json')
-    
-    # Check if completed: traj.jsonl exists with turn_idx, and metrics.json exists
-    is_complete = False
-    if os.path.exists(traj_file) and os.path.exists(metrics_file):
-        try:
-            with open(traj_file, 'r', encoding='utf-8') as f:
-                lines = [l for l in f if l.strip()]
-                # Check if there are any turn_idx entries
-                for line in lines:
-                    try:
-                        traj_data = json.loads(line)
-                        if 'turn_idx' in traj_data and traj_data['turn_idx'] is not None:
-                            is_complete = True
-                            break
-                    except (json.JSONDecodeError, KeyError) as e:
-                        logger.debug(f"Error parsing trajectory line: {e}")
-                        pass
-        except Exception as e:
-            logger.debug(f"Error reading trajectory file: {e}")
-            pass
-    
-    if not is_complete:
-        return None
-    
-    # Try to load existing result
+
+    question_id = os.path.basename(sample_dir)
+    rollouts_per_sample = getattr(args, 'rollouts_per_sample', 1)
     sample_rollout_results = []
-    try:
-        with open(metrics_file, 'r', encoding='utf-8') as f:
-            metrics = json.load(f)
-        
-        # Read turns from traj.jsonl to get accurate turn count
-        num_turns = 0
-        try:
-            with open(traj_file, 'r', encoding='utf-8') as f:
-                max_turn_idx = -1
-                for line in f:
-                    if line.strip():
-                        try:
-                            traj_data = json.loads(line)
-                            turn_idx = traj_data.get('turn_idx')
-                            if turn_idx is not None and turn_idx > max_turn_idx:
-                                max_turn_idx = turn_idx
-                        except (json.JSONDecodeError, KeyError) as e:
-                            logger.debug(f"Error parsing trajectory line: {e}")
-                            pass
-            num_turns = max_turn_idx + 1 if max_turn_idx >= 0 else 0
-        except Exception as e:
-            logger.debug(f"Error reading trajectory file for turn count: {e}")
-            pass
-        
-        # Create a conversation_history with the correct number of assistant turns
-        # This ensures accurate turn statistics
-        conversation_history = [{"role": "assistant", "content": ""} for _ in range(num_turns)] if num_turns > 0 else []
-        
-        # Create result dict with accurate turn information
-        sample_rollout_results.append({
-            'question_id': os.path.basename(sample_dir),
-            'accuracy_score': metrics.get('accuracy_score', 0.0),
-            'conversation_history': conversation_history,
-        })
-    except Exception as e:
-        logger.debug(f"Error loading existing metrics: {e}")
-        pass
-    
+
+    if rollouts_per_sample and rollouts_per_sample > 1:
+        for rollout_idx in range(rollouts_per_sample):
+            rollout_dir = os.path.join(sample_dir, f'rollout_{rollout_idx}')
+            result = _load_completed_rollout_result(rollout_dir, question_id, rollout_idx)
+            if result is None:
+                return None
+            sample_rollout_results.append(result)
+        summary_path = os.path.join(sample_dir, SAMPLE_SUMMARY_FILENAME)
+        if not os.path.exists(summary_path):
+            compute_and_save_sample_summary(
+                question_id, sample_rollout_results, rollouts_per_sample, sample_dir
+            )
+    else:
+        result = _load_completed_rollout_result(sample_dir, question_id, None)
+        if result is None:
+            return None
+        sample_rollout_results.append(result)
+
     return {
         'sample_rollout_results': sample_rollout_results
     }
@@ -783,6 +812,8 @@ def execute_pipeline_parallel_processing(
         # Initialize tracking
         active_futures = {}  # future -> info dict
         pending_retrieval_samples = []
+        skipped_samples = 0
+        skipped_rollouts = 0
         
         # Prepare all sample data
         for local_idx, sample in enumerate(samples):
@@ -790,6 +821,19 @@ def execute_pipeline_parallel_processing(
             question_id = sample_results_dict[actual_sample_idx]['question_id']
             sample_dir = sample_results_dict[actual_sample_idx]['sample_dir']
             sample_args = prepare_sample_args(args)
+
+            completed_info = check_sample_completed(sample_dir, sample_args)
+            if completed_info:
+                completed_results = completed_info.get('sample_rollout_results', [])
+                sample_results_dict[actual_sample_idx]['results'].extend(completed_results)
+                sample_results_dict[actual_sample_idx]['skipped_completed'] = True
+                if all_results_list is not None:
+                    all_results_list.extend(completed_results)
+                skipped_samples += 1
+                skipped_rollouts += len(completed_results)
+                print(f"  [Pipeline] Sample {question_id}: already completed, skipping {len(completed_results)} rollouts.")
+                continue
+
             pending_retrieval_samples.append({
                 'sample_idx': actual_sample_idx,
                 'sample': sample,
@@ -798,8 +842,15 @@ def execute_pipeline_parallel_processing(
                 'sample_dir': sample_dir
             })
 
+        if skipped_samples:
+            print(f"  [Pipeline] Skipped {skipped_samples} completed samples ({skipped_rollouts} rollouts).")
+
+        if not pending_retrieval_samples:
+            print("  [Pipeline] All samples in this batch are already completed.")
+            return
+
         # Progress tracking
-        total_rollouts = len(samples) * args.rollouts_per_sample
+        total_rollouts = len(pending_retrieval_samples) * args.rollouts_per_sample
         pbar = tqdm(total=total_rollouts, desc=progress_desc or "Processing rollouts")
         
         rollout_counts = {}  # track completed rollouts per sample

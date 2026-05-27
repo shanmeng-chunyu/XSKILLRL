@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from xskill_rl.benchmark_protocol import (
+    ensure_benchmark_prefixed_id,
     normalize_images,
     normalize_record,
     read_json,
@@ -24,6 +25,7 @@ def normalize_agentvista(records: List[Dict]) -> List[Dict]:
     normalized = []
     for index, item in enumerate(records):
         doc_id = item.get("doc_id") or item.get("id") or f"agentvista_{index:04d}"
+        doc_id = ensure_benchmark_prefixed_id(doc_id, "agentvista")
         problem = item.get("problem") or item.get("question") or ""
         solution = item.get("solution") or item.get("answer") or ""
         images = normalize_images(item.get("images") or item.get("image"))

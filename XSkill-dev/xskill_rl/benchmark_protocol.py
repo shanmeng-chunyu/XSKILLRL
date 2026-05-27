@@ -37,6 +37,31 @@ def normalize_images(value) -> List[str]:
     return [str(value)]
 
 
+def normalize_benchmark_name(value: str) -> str:
+    normalized = str(value).strip().lower().replace("-", "_")
+    normalized = "_".join(part for part in normalized.split("_") if part)
+    aliases = {
+        "mm_browsecomp": "mmbrowsecomp",
+        "mm_browse_comp": "mmbrowsecomp",
+        "mmbrowse_comp": "mmbrowsecomp",
+        "tir_bench": "tirbench",
+        "visual_tool_bench": "visualtoolbench",
+        "agent_vista": "agentvista",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def ensure_benchmark_prefixed_id(doc_id, benchmark_name: str) -> str:
+    benchmark = normalize_benchmark_name(benchmark_name)
+    doc_id_text = str(doc_id).strip()
+    if not doc_id_text:
+        return benchmark
+    prefix = f"{benchmark}_"
+    if doc_id_text == benchmark or doc_id_text.startswith(prefix):
+        return doc_id_text
+    return f"{prefix}{doc_id_text}"
+
+
 def normalize_record(
     record: Dict,
     *,
@@ -47,15 +72,16 @@ def normalize_record(
     images: Sequence[str],
     extra_fields: Optional[Dict] = None,
 ) -> Dict:
-    payload = {
-        "doc_id": str(doc_id),
-        "problem": problem,
-        "solution": solution,
-        "images": list(images),
-        "benchmark_name": benchmark_name,
-    }
-    if extra_fields:
-        payload.update(extra_fields)
+    payload = dict(extra_fields or {})
+    payload.update(
+        {
+            "doc_id": ensure_benchmark_prefixed_id(doc_id, benchmark_name),
+            "problem": problem,
+            "solution": solution,
+            "images": list(images),
+            "benchmark_name": normalize_benchmark_name(benchmark_name),
+        }
+    )
     return payload
 
 

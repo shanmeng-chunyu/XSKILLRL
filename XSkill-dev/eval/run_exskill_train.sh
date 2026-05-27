@@ -60,7 +60,7 @@ export EXPERIENCE_END_POINT_2="${EXPERIENCE_END_POINT_2:-}"
 # Local open-source embedding by default. Set EXPERIENCE_EMBEDDING_BACKEND=api
 # and fill API key/endpoint if you prefer an OpenAI-compatible embedding API.
 export EXPERIENCE_EMBEDDING_BACKEND="${EXPERIENCE_EMBEDDING_BACKEND:-local}"
-export EXPERIENCE_EMBEDDING_MODEL="${EXPERIENCE_EMBEDDING_MODEL:-BAAI/bge-m3}"
+export EXPERIENCE_EMBEDDING_MODEL="${EXPERIENCE_EMBEDDING_MODEL:-${PROJECT_ROOT}/models/bge-m3}"
 export EXPERIENCE_EMBEDDING_DEVICE="${EXPERIENCE_EMBEDDING_DEVICE:-cuda}"
 export EXPERIENCE_EMBEDDING_API_KEY="${EXPERIENCE_EMBEDDING_API_KEY:-}"
 export EXPERIENCE_EMBEDDING_ENDPOINT="${EXPERIENCE_EMBEDDING_ENDPOINT:-}"
@@ -72,7 +72,7 @@ export EXPERIENCE_EMBEDDING_ENDPOINT="${EXPERIENCE_EMBEDDING_ENDPOINT:-}"
 # Reverse image search is local VLM caption -> Bocha search; no image upload.
 export SEARCH_API_PROVIDER="${SEARCH_API_PROVIDER:-bocha}"
 export IMAGE_SEARCH_PROVIDER="${IMAGE_SEARCH_PROVIDER:-bocha}"
-export BOCHA_API_KEY="${BOCHA_API_KEY:-}"
+export BOCHA_API_KEY="${BOCHA_API_KEY:-sk-136708b15db84f73bf20a7ce42245da9}"
 
 # Visit uses local requests + trafilatura only.
 export VISIT_BACKEND="${VISIT_BACKEND:-local}"
@@ -84,17 +84,17 @@ export ENABLED_TOOLS="${ENABLED_TOOLS:-web_search, image_search, visit, code_int
 
 TOOL_CONFIG_PATH="${TOOL_CONFIG_PATH:-eval/configs/tool_configs.yaml}"
 
-IMAGE_SEARCH_MAX_CALLS="${IMAGE_SEARCH_MAX_CALLS:-0}"
+IMAGE_SEARCH_MAX_CALLS="${IMAGE_SEARCH_MAX_CALLS:-2}"
 WEB_SEARCH_MAX_CALLS="${WEB_SEARCH_MAX_CALLS:-3}"
 
 # ============================================================================
 # Inference Parameters
 # ============================================================================
 
-MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-65536}"
-MAX_COMPLETION_TOKENS="${MAX_COMPLETION_TOKENS:-12288}"
-MAX_TURNS="${MAX_TURNS:-20}"
-MAX_IMAGES="${MAX_IMAGES:-100}"
+MAX_TOTAL_TOKENS="${MAX_TOTAL_TOKENS:-32768}"
+MAX_COMPLETION_TOKENS="${MAX_COMPLETION_TOKENS:-4096}"
+MAX_TURNS="${MAX_TURNS:-10}"
+MAX_IMAGES="${MAX_IMAGES:-50}"
 TEMPERATURE="${TEMPERATURE:-0.6}"
 TOP_P="${TOP_P:-1.0}"
 
@@ -121,7 +121,7 @@ SKILL_MAX_LENGTH="${SKILL_MAX_LENGTH:-1000}"
 # ============================================================================
 
 # SYSTEM_PROMPT_TYPE="multi_tool_agent_search"
-SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-multi_tool_agent}"
+SYSTEM_PROMPT_TYPE="${SYSTEM_PROMPT_TYPE:-multi_tool_agent_search}"
 # SYSTEM_PROMPT_TYPE="multi_tool_agent_code"
 # SYSTEM_PROMPT_TYPE="agent_zoom"
 # SYSTEM_PROMPT_TYPE="direct_cot"
@@ -139,7 +139,7 @@ SKILL_LIBRARY="${SKILL_LIBRARY:-memory_bank/xskill_accum/${EXP_NAME}/SKILL.md}"
 
 MAX_SAMPLES="${MAX_SAMPLES:-0}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
-ROLLOUTS_PER_SAMPLE="${ROLLOUTS_PER_SAMPLE:-2}"
+ROLLOUTS_PER_SAMPLE="${ROLLOUTS_PER_SAMPLE:-4}"
 EXPERIENCE_LARGE_BATCH="${EXPERIENCE_LARGE_BATCH:-32}"
 
 

@@ -5,7 +5,66 @@ Parses tool calls and answer tags from model outputs.
 
 import re
 import json
+import ast
 from typing import Tuple, Any, Dict, Union
+
+
+def _parse_tool_arguments(arguments: Any) -> Tuple[bool, Any]:
+    if isinstance(arguments, dict):
+        return True, arguments
+    if arguments is None:
+        return True, {}
+    if isinstance(arguments, str):
+        text = arguments.strip()
+        if not text:
+            return True, {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            try:
+                parsed = ast.literal_eval(text)
+            except Exception:
+                return False, f"Invalid JSON in arguments: {arguments}"
+        return True, parsed if isinstance(parsed, dict) else {"input": parsed}
+    return True, {"input": arguments}
+
+
+def _parse_tool_payload(payload: str) -> Tuple[str, Any]:
+    text = payload.strip()
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            data = ast.literal_eval(text)
+        except Exception:
+            return "error", f"Invalid JSON in tool call: {payload}"
+
+    if not isinstance(data, dict):
+        return "error", f"Tool call payload must be a JSON object: {payload}"
+
+    tool_name = data.get("name") or data.get("tool_name") or data.get("tool")
+    arguments = data.get("arguments")
+    if arguments is None:
+        arguments = data.get("parameters")
+    if arguments is None:
+        arguments = data.get("args")
+    if arguments is None:
+        arguments = {
+            key: value
+            for key, value in data.items()
+            if key not in {"name", "tool_name", "tool"}
+        }
+
+    ok, parsed_arguments = _parse_tool_arguments(arguments)
+    if not ok:
+        return "error", parsed_arguments
+    if not tool_name:
+        return "error", "Tool call missing 'name' field"
+
+    return "tool_call", {
+        "tool_name": str(tool_name),
+        "parameters": parsed_arguments,
+    }
 
 
 def parse_function_call_response(response: Union[str, Dict], text_content: str = None) -> Tuple[str, Any]:
@@ -57,13 +116,9 @@ def parse_function_call_response(response: Union[str, Dict], text_content: str =
                 arguments = function_data.get("arguments", "{}")
                 
                 # Parse arguments (may be string or dict)
-                if isinstance(arguments, str):
-                    try:
-                        parameters = json.loads(arguments)
-                    except json.JSONDecodeError:
-                        return "error", f"Invalid JSON in arguments: {arguments}"
-                else:
-                    parameters = arguments
+                ok, parameters = _parse_tool_arguments(arguments)
+                if not ok:
+                    return "error", parameters
                 
                 if not tool_name:
                     return "error", "Tool call missing 'name' field"
@@ -86,6 +141,18 @@ def parse_function_call_response(response: Union[str, Dict], text_content: str =
     
     # Case 2: Response is string
     if isinstance(response, str):
+        # Check for text-form tool call. Some OpenAI-compatible local models
+        # (including Qwen-family vLLM deployments) may emit the tool call as
+        # text instead of returning an OpenAI `tool_calls` field.
+        for pattern in (
+            r"<tool_call>(.*?)</tool_call>",
+            r"<tool>(.*?)</tool>",
+            r"```(?:json)?\s*(\{.*?\"(?:name|tool_name|tool)\".*?\})\s*```",
+        ):
+            match = re.search(pattern, response, flags=re.IGNORECASE | re.DOTALL)
+            if match:
+                return _parse_tool_payload(match.group(1))
+
         # Check for <answer> tag (for final answer)
         answer_match = re.search(r'<answer>(.*?)</answer>', response, re.DOTALL)
         if answer_match:

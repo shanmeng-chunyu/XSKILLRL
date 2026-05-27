@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from xskill_rl.benchmark_protocol import (
+    ensure_benchmark_prefixed_id,
     normalize_images,
     normalize_record,
     read_json,
@@ -36,6 +37,7 @@ def normalize_visualtoolbench(records: List[Dict]) -> List[Dict]:
         images = normalize_images(images_by_turn[0] if images_by_turn else item.get("images"))
         prompt_category = item.get("prompt_category") or "unknown"
         doc_id = item.get("doc_id") or item.get("id") or f"visualtoolbench_{index:04d}"
+        doc_id = ensure_benchmark_prefixed_id(doc_id, "visualtoolbench")
         extra = dict(item)
         extra["prompt_category"] = prompt_category
         normalized.append(

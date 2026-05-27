@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from xskill_rl.benchmark_protocol import (
+    ensure_benchmark_prefixed_id,
     normalize_images,
     normalize_record,
     read_json,
@@ -23,7 +24,33 @@ from xskill_rl.benchmark_protocol import (
 ALLOWED_TASKS = {"refcoco", "maze", "instrument", "ocr", "contrast"}
 
 
-def normalize_tirbench(records: List[Dict]) -> List[Dict]:
+def _collect_images(item: Dict, image_prefix: str | None) -> List[str]:
+    raw_images = item.get("images") or item.get("image") or item.get("img")
+    if not raw_images:
+        raw_images = [
+            item.get("image_1"),
+            item.get("image_2"),
+        ]
+    images = normalize_images(raw_images)
+    if not image_prefix:
+        return images
+
+    normalized = []
+    prefix = image_prefix.strip("/\\")
+    for image in images:
+        image_text = str(image)
+        if image_text.startswith(("http://", "https://", "data:image/")):
+            normalized.append(image_text)
+        elif Path(image_text).is_absolute():
+            normalized.append(image_text)
+        elif image_text.startswith(prefix + "/") or image_text.startswith(prefix + "\\"):
+            normalized.append(image_text.replace("\\", "/"))
+        else:
+            normalized.append(f"{prefix}/{image_text}".replace("\\", "/"))
+    return normalized
+
+
+def normalize_tirbench(records: List[Dict], *, image_prefix: str | None = None) -> List[Dict]:
     normalized = []
     for index, item in enumerate(records):
         task = (
@@ -37,11 +64,15 @@ def normalize_tirbench(records: List[Dict]) -> List[Dict]:
         if task not in ALLOWED_TASKS:
             continue
         doc_id = item.get("doc_id") or item.get("id") or f"tirbench_{index:04d}"
-        problem = item.get("problem") or item.get("question") or ""
+        doc_id = ensure_benchmark_prefixed_id(doc_id, "tirbench")
+        problem = item.get("problem") or item.get("question") or item.get("prompt") or ""
         solution = item.get("solution") or item.get("answer") or ""
-        images = normalize_images(item.get("images") or item.get("image") or item.get("img"))
+        images = _collect_images(item, image_prefix)
         extra = dict(item)
         extra["_tirbench_task"] = task
+        extra["problem"] = problem
+        extra["solution"] = solution
+        extra["images"] = images
         normalized.append(
             normalize_record(
                 extra,
@@ -62,9 +93,18 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--test-ratio", type=float, default=0.2)
+    parser.add_argument(
+        "--image-prefix",
+        default=None,
+        help="Prefix for relative image paths written to JSON. Defaults to output directory name.",
+    )
     args = parser.parse_args()
 
-    records = normalize_tirbench(read_json(args.input_json))
+    image_prefix = args.image_prefix
+    if image_prefix is None:
+        image_prefix = Path(args.output_dir).name
+
+    records = normalize_tirbench(read_json(args.input_json), image_prefix=image_prefix)
     train_records, test_records, manifest = stratified_train_test_split(
         records,
         test_ratio=args.test_ratio,

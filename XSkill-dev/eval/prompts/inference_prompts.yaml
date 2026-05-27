@@ -34,6 +34,8 @@ system_prompts:
     - Always explain your detailed reasoning process before using any tool.
     - You can ONLY call one tool at one turn! Do not call multiple tools in one turn!
     - If you decide to use a tool, you MUST actually call it through the tool-calling interface in the same response. Do not only say that you will use it.
+    - If the API tool-calling interface is unavailable, emit exactly one text tool call in this format:
+      <tool_call>{"name":"zoom","arguments":{"code":"python code to crop or inspect images"}}</tool_call>
     - You MUST provide your final answer using complete <answer>...</answer> tags!
 
   # Multi-tool agent with web access, image search, zoom, and code execution
@@ -62,6 +64,8 @@ system_prompts:
     - Always explain your detailed reasoning process before using any tool.
     - You can ONLY call one tool at one turn! Do not call multiple tools in one turn!
     - If you decide to use a tool, you MUST actually call it through the tool-calling interface in the same response. Do not only say that you will use it.
+    - If the API tool-calling interface is unavailable, emit exactly one text tool call in this format:
+      <tool_call>{"name":"web_search","arguments":{"query":"search terms","max_results":5}}</tool_call>
     - You MUST provide your final answer using complete <answer>...</answer> tags!
 
   multi_tool_agent_code: |
@@ -85,6 +89,8 @@ system_prompts:
     - Always explain your detailed reasoning process before using any tool.
     - You can ONLY call one tool at one turn! Do not call multiple tools in one turn!
     - If you decide to use a tool, you MUST actually call it through the tool-calling interface in the same response. Do not only say that you will use it.
+    - If the API tool-calling interface is unavailable, emit exactly one text tool call in this format:
+      <tool_call>{"name":"code_interpreter","arguments":{"code":"python code"}}</tool_call>
     - You MUST provide your final answer using complete <answer>...</answer> tags!
 
 
@@ -113,5 +119,7 @@ system_prompts:
     - Always explain your detailed reasoning process before using any tool.
     - You can ONLY call one tool at one turn! Do not call multiple tools in one turn!
     - If you decide to use a tool, you MUST actually call it through the tool-calling interface in the same response. Do not only say that you will use it.
+    - If the API tool-calling interface is unavailable, emit exactly one text tool call in this format:
+      <tool_call>{"name":"web_search","arguments":{"query":"search terms","max_results":5}}</tool_call>
     - You MUST provide your final answer using complete <answer>...</answer> tags!
 

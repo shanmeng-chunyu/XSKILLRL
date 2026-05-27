@@ -4,6 +4,7 @@ Model caller for API-based inference (vision API + function calling).
 
 import os
 import time
+import json
 from search.tree import SearchNode
 from utils.function_call_parser import parse_function_call_response
 from utils.result_utils import save_trajectory
@@ -104,6 +105,12 @@ def create_model_caller(args, sampling_params, save_dir=None):
                 print(f"[Function Calling] ENABLED_TOOLS not set, using all registered tools: {tool_names}")
             
             tools_schema = build_openai_tools_schema(tool_names)
+            schema_names = [
+                item.get("function", {}).get("name", "")
+                for item in tools_schema
+                if isinstance(item, dict)
+            ]
+            print(f"[Function Calling] Enabled tools schema: {schema_names}")
 
         except Exception as e:
             print(f"[Function Calling] Warning: Failed to build tools schema: {e}")
@@ -190,8 +197,29 @@ def create_model_caller(args, sampling_params, save_dir=None):
                     reasoning_text = response_text.strip()
                     print(f"[Reasoning] Using content field as reasoning_text: {len(reasoning_text)} chars")
             
-            is_tool_call_response = isinstance(response, dict) and "tool_calls" in response
-            tool_calls_list = response.get("tool_calls", []) if is_tool_call_response else []
+            parsed_action, parsed_data = parse_function_call_response(response, text_content=response_text)
+            text_tool_call_id = f"call_{getattr(node, 'current_turn', 0)}"
+            is_text_tool_call_response = (
+                not (isinstance(response, dict) and response.get("tool_calls"))
+                and parsed_action == "tool_call"
+            )
+            is_tool_call_response = (
+                isinstance(response, dict) and "tool_calls" in response
+            ) or is_text_tool_call_response
+            tool_calls_list = response.get("tool_calls", []) if isinstance(response, dict) and is_tool_call_response else []
+            if is_text_tool_call_response:
+                tool_calls_list = [{
+                    "id": text_tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": parsed_data.get("tool_name", ""),
+                        "arguments": json.dumps(
+                            parsed_data.get("parameters", {}),
+                            ensure_ascii=False,
+                        ),
+                    },
+                }]
+                print(f"[Function Calling] Parsed text tool call: {parsed_data.get('tool_name', '')}")
             
             # Update the node with the response
             if is_tool_call_response:
@@ -256,13 +284,15 @@ def create_model_caller(args, sampling_params, save_dir=None):
                 save_trajectory(save_dir,assistant_turn_for_traj)
             
             # Parse response using new function call parser
-            action, data = parse_function_call_response(response, text_content=response_text)
+            action, data = parsed_action, parsed_data
             
             if action == "function_call" or action == "tool_call":
                 # Handle function calls using unified tool handler
                 tool_name = data.get("tool_name", "")
                 parameters = data.get("parameters", {})
                 tool_call_id = data.get("tool_call_id")
+                if not tool_call_id and is_text_tool_call_response:
+                    tool_call_id = text_tool_call_id
                 
                 if not tool_call_id and node.api_conversation_history:
                     last_msg = node.api_conversation_history[-1]
@@ -299,4 +329,8 @@ def create_model_caller(args, sampling_params, save_dir=None):
             traceback.print_exc()
             return None
     
+    def close():
+        tool_handler.close()
+
+    model_caller.close = close
     return model_caller

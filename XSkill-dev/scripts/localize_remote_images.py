@@ -102,8 +102,10 @@ def localize_url(
     url = normalize_url(url)
     rel_guess = target_relative_path(url)
     target = cache_dir / rel_guess
+    prefix = path_prefix.rstrip("/")
+    local_ref = f"{prefix}/{rel_guess.as_posix()}" if prefix else rel_guess.as_posix()
     if target.exists():
-        return f"{path_prefix.rstrip('/')}/{rel_guess.as_posix()}", {
+        return local_ref, {
             "url": url,
             "local_path": str(target),
             "relative_path": rel_guess.as_posix(),
@@ -111,7 +113,7 @@ def localize_url(
         }
 
     if dry_run:
-        return f"{path_prefix.rstrip('/')}/{rel_guess.as_posix()}", {
+        return local_ref, {
             "url": url,
             "local_path": str(target),
             "relative_path": rel_guess.as_posix(),
@@ -124,7 +126,9 @@ def localize_url(
     target.parent.mkdir(parents=True, exist_ok=True)
     if not target.exists():
         target.write_bytes(data)
-    return f"{path_prefix.rstrip('/')}/{rel_path.as_posix()}", {
+    prefix = path_prefix.rstrip("/")
+    local_ref = f"{prefix}/{rel_path.as_posix()}" if prefix else rel_path.as_posix()
+    return local_ref, {
         "url": url,
         "local_path": str(target),
         "relative_path": rel_path.as_posix(),
@@ -184,7 +188,11 @@ def main() -> None:
     parser.add_argument("--input-json", action="append", required=True, help="Input XSkill JSON file. Can be repeated.")
     parser.add_argument("--output-json", action="append", required=True, help="Output JSON file. Must match --input-json count.")
     parser.add_argument("--cache-dir", default="benchmark/_remote_images", help="Directory where downloaded images are stored.")
-    parser.add_argument("--path-prefix", default="benchmark/_remote_images", help="Path prefix written into output JSON.")
+    parser.add_argument(
+        "--path-prefix",
+        default="_remote_images",
+        help="Path prefix written into output JSON. Use a path relative to the runtime image root.",
+    )
     parser.add_argument("--manifest-path", default="output/rl_data/remote_image_manifest.json")
     parser.add_argument("--retries", type=int, default=5)
     parser.add_argument("--timeout", type=int, default=30)

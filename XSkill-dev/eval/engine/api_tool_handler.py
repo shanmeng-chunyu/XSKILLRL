@@ -129,7 +129,8 @@ class APIToolHandler:
                         image_ref = os.path.join(self.save_dir, image_ref)
                     
                     if os.path.exists(image_ref):
-                        pil_image = Image.open(image_ref)
+                        with Image.open(image_ref) as opened_image:
+                            pil_image = opened_image.copy()
                     else:
                         print(f"Warning: Image file not found: {image_ref}")
                         continue
@@ -278,6 +279,18 @@ class APIToolHandler:
             print(f"[Tool Cache] Reusing existing instance of {tool_name}")
         
         return self.tool_instances[tool_name]
+
+    def close(self):
+        """Release cached tool resources at the end of one rollout/sample."""
+        for tool_name, tool in list(self.tool_instances.items()):
+            close_fn = getattr(tool, 'close', None)
+            if not callable(close_fn):
+                continue
+            try:
+                close_fn()
+            except Exception as e:
+                print(f"[Tool Cache] Warning: failed to close {tool_name}: {e}")
+        self.tool_instances.clear()
     
     def prepare_tool_kwargs(self, tool_name, node):
         """
