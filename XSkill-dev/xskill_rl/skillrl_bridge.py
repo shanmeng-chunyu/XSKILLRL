@@ -266,6 +266,7 @@ class XSkillVisualQAEnvironment:
         payload.setdefault("problem", payload.get("question", ""))
         payload.setdefault("solution", payload.get("answer", ""))
         payload.setdefault("images", _as_list(_first_present(payload, "images", "image", "img")))
+        payload["problem"] = _append_source_urls(str(payload.get("problem", "")), payload)
         return payload
 
     def _prompt_text(self, item: Dict[str, Any]) -> str:
@@ -808,6 +809,32 @@ def _normalize_url(value: str) -> str:
 def _is_http_url(value: Any) -> bool:
     text = str(value)
     return text.startswith(("http://", "https://"))
+
+
+def _append_source_urls(problem: str, item: Dict[str, Any]) -> str:
+    source = item.get("source")
+    if source is None:
+        return problem
+    values = source if isinstance(source, list) else [source]
+    urls: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in urls:
+            urls.append(text)
+    if not urls:
+        return problem
+    existing = str(problem or "").lower()
+    missing_urls = [url for url in urls if url.lower() not in existing]
+    if not missing_urls:
+        return str(problem or "").strip()
+    source_lines = "\n".join(f"{idx}. {url}" for idx, url in enumerate(missing_urls, start=1))
+    source_section = (
+        "Source URLs provided by the benchmark. Use the visit tool on these URLs "
+        "when they are relevant:\n"
+        f"{source_lines}"
+    )
+    problem_text = str(problem or "").strip()
+    return f"{problem_text}\n\n{source_section}" if problem_text else source_section
 
 
 def _as_list(value) -> List[Any]:

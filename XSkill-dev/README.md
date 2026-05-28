@@ -225,3 +225,14 @@ If you use XSkill in your research, please cite:
 ## License
 
 This project is released under the [MIT License](LICENSE).
+
+## Local Integration Additions
+
+This fork adds several XSKILLRL-specific utilities on top of the original XSkill workflow:
+
+- Samples may include a `source` field. When present, source URLs are appended to the prompt and should be accessed through the `visit` tool when relevant.
+- Accumulation scoring uses only the concrete parsed `final_answer`. Error final answers, unfinished tool calls, parser failures, and max-turn exhaustion are scored as `0.0`.
+- `scripts/cleanup_error_scored_samples.py` removes older rollout outputs where `final_answer` starts with `Error` but `accuracy_score` was previously saved as `1.0`.
+- `scripts/cleanup_mmbrowse_source_outputs.py` removes MMBrowseComp source-URL sample outputs so they can be regenerated after prompt changes.
+
+Both cleanup scripts are dry-run by default and require `--delete` or `--quarantine-dir` to modify files.

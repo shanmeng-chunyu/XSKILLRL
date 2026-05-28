@@ -175,3 +175,18 @@ rollout prompt 中应在运行时出现：
 ```
 
 如果没有配置 SkillUpdater 所需的外部 LLM 环境变量，会跳过 skill 更新，但训练不会因此中断。
+
+## 7. Source URLs, Visit, and Strict Scoring
+
+The runtime SkillRL bridge now normalizes each sample before rollout and appends any non-empty `source` URLs to `problem`. This keeps RL validation/training behavior aligned with XSkill accumulation and SFT export. For source-only MMBrowseComp samples, the model should use the `visit` tool when the URL is relevant.
+
+Scoring is intentionally stricter in the XSkill accumulation path: the verifier receives only the parsed concrete `final_answer`, not the whole assistant trajectory. A rollout that ends in `Error: ...`, an unfinished tool call, parser failure, or max-turn exhaustion is scored as `0.0`. This avoids treating a reasonable but unfinished tool-use trajectory as a correct final answer.
+
+When rerunning older accumulation outputs, use:
+
+```bash
+python scripts/cleanup_error_scored_samples.py \
+  --output-dir output/xskill_accum/qwen3vl8b_mixed_train_core_seed42
+```
+
+Then rerun with `--delete` or `--quarantine-dir` after checking the dry-run report.

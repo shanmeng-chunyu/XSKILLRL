@@ -36,6 +36,32 @@ def _as_text_list(value: Any) -> List[str]:
     return [str(value)]
 
 
+def _append_source_urls(problem: str, sample: Dict[str, Any]) -> str:
+    source = sample.get("source")
+    if source is None:
+        return problem
+    values = source if isinstance(source, list) else [source]
+    urls: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in urls:
+            urls.append(text)
+    if not urls:
+        return problem
+    existing = str(problem or "").lower()
+    missing_urls = [url for url in urls if url.lower() not in existing]
+    if not missing_urls:
+        return str(problem or "").strip()
+    source_lines = "\n".join(f"{idx}. {url}" for idx, url in enumerate(missing_urls, start=1))
+    source_section = (
+        "Source URLs provided by the benchmark. Use the visit tool on these URLs "
+        "when they are relevant:\n"
+        f"{source_lines}"
+    )
+    problem_text = str(problem or "").strip()
+    return f"{problem_text}\n\n{source_section}" if problem_text else source_section
+
+
 def _as_verl_image_items(value: Any) -> List[Dict[str, str]]:
     return [{"image": image} for image in _as_text_list(value)]
 
@@ -67,7 +93,7 @@ def sample_to_verl_record(
     top_k: int = 6,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
 ) -> Dict[str, Any]:
-    problem = _as_text(sample.get("problem") or sample.get("question") or "")
+    problem = _append_source_urls(_as_text(sample.get("problem") or sample.get("question") or ""), sample)
     skill_text = ""
     retrieval_payload: Dict[str, Any] = {}
     if memory is not None:

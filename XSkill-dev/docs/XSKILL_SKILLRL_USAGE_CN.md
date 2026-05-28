@@ -117,3 +117,43 @@ python scripts/build_skillrl_grpo_command.py `
 - experience embedding: 默认本地开源 `sentence-transformers`，配置 `EXPERIENCE_EMBEDDING_BACKEND=local`。
 
 详细配置见 `docs/TOOL_AND_EMBEDDING_BACKENDS_CN.md`。
+
+## 7. Source URL Prompt Injection
+
+For samples with a non-empty `source` field, the XSkill accumulation path and the SkillRL/SFT export path append the source URLs to the task prompt:
+
+```text
+Source URLs provided by the benchmark. Use the visit tool on these URLs when they are relevant:
+1. https://...
+```
+
+This is mainly used for MMBrowseComp-style samples where the image field can be empty but the benchmark still provides useful web references. The model still cannot access web pages directly; it must call the `visit` tool. If the source prompt format changes, old rollout outputs for those samples should be deleted and regenerated:
+
+```bash
+python scripts/cleanup_mmbrowse_source_outputs.py \
+  --output-dir output/xskill_accum/qwen3vl8b_mixed_train_core_seed42 \
+  --train-core benchmark/_mixed_protocol/train_core.json
+
+# After checking the dry-run report:
+python scripts/cleanup_mmbrowse_source_outputs.py \
+  --output-dir output/xskill_accum/qwen3vl8b_mixed_train_core_seed42 \
+  --train-core benchmark/_mixed_protocol/train_core.json \
+  --delete
+```
+
+## 8. Error Final Answer Cleanup
+
+The current scorer only evaluates a concrete parsed `final_answer`. If a rollout ends with `Error: ...`, a tool call, parser failure, or max-turn exhaustion, the score is forced to `0.0`. Older outputs produced before this fix may contain `final_answer` starting with `Error` but `accuracy_score=1.0`; delete those sample directories before rerunning accumulation:
+
+```bash
+python scripts/cleanup_error_scored_samples.py \
+  --output-dir output/xskill_accum/qwen3vl8b_mixed_train_core_seed42 \
+  --report-json output/error_scored_samples.json
+
+# After checking the dry-run report:
+python scripts/cleanup_error_scored_samples.py \
+  --output-dir output/xskill_accum/qwen3vl8b_mixed_train_core_seed42 \
+  --delete
+```
+
+Use `--quarantine-dir output/quarantine_error_scored_samples` instead of `--delete` if you want to keep a copy of the matched sample directories.

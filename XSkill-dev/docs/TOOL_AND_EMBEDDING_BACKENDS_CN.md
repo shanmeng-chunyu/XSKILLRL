@@ -82,3 +82,11 @@ export ENABLED_TOOLS="web_search, image_search, visit, code_interpreter"
 - `IMGBB_API_KEY`
 - `OPENAI_API_KEY`
 - `OPENAI_API_BASE`
+
+## 5. Source URL Samples
+
+Some benchmark records, especially MMBrowseComp, provide useful `source` URLs even when `images` is empty. The current pipeline appends these URLs into the model prompt and expects the model to call `visit` when it needs page content. The model does not browse directly.
+
+`visit` uses local HTTP extraction (`requests` + `trafilatura`) and may optionally summarize page content through the configured OpenAI-compatible reasoning/evaluator endpoint. Warnings such as "No API key provided, using environment variable REASONING_API_KEY or EVALUATOR_API_KEY" mean the optional summarization client is falling back to environment variables; they are not fatal if the endpoint variables are set correctly.
+
+Google search, Google Maps, and similar anti-bot pages can still return HTTP 403 to local `requests` even when the server has general internet access. Prefer source URLs that expose normal pages or use `web_search` first to find fetchable pages.

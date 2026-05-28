@@ -209,6 +209,32 @@ def _extract_images(sample: Dict[str, Any]) -> List[Any]:
     return []
 
 
+def _append_source_urls(problem: str, sample: Dict[str, Any]) -> str:
+    source = sample.get("source")
+    if source is None:
+        return problem
+    values = source if isinstance(source, list) else [source]
+    urls: List[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in urls:
+            urls.append(text)
+    if not urls:
+        return problem
+    existing = str(problem or "").lower()
+    missing_urls = [url for url in urls if url.lower() not in existing]
+    if not missing_urls:
+        return str(problem or "").strip()
+    source_lines = "\n".join(f"{idx}. {url}" for idx, url in enumerate(missing_urls, start=1))
+    source_section = (
+        "Source URLs provided by the benchmark. Use the visit tool on these URLs "
+        "when they are relevant:\n"
+        f"{source_lines}"
+    )
+    problem_text = str(problem or "").strip()
+    return f"{problem_text}\n\n{source_section}" if problem_text else source_section
+
+
 def _build_prompt(
     sample: Dict[str, Any],
     memory: SkillsOnlyMemory | None,
@@ -216,7 +242,7 @@ def _build_prompt(
     *,
     enable_tools: bool,
 ) -> str:
-    problem = _extract_problem(sample) or IMAGE_ONLY_PROMPT
+    problem = _append_source_urls(_extract_problem(sample) or IMAGE_ONLY_PROMPT, sample)
     system_prompt = DEFAULT_SYSTEM_PROMPT
     if memory is not None:
         retrieval = memory.retrieve(task_description=problem, top_k=top_k, metadata=sample)

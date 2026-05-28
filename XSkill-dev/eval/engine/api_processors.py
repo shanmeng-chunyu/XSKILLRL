@@ -27,6 +27,45 @@ def _resolve_image_source(image_folder, image_ref):
     return os.path.join(image_folder, image_ref)
 
 
+def _as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _source_urls(sample):
+    urls = []
+    for value in _as_list(sample.get("source")):
+        text = str(value or "").strip()
+        if text and text not in urls:
+            urls.append(text)
+    return urls
+
+
+def _append_source_urls(question, sample):
+    urls = _source_urls(sample)
+    if not urls:
+        return question
+    question_text = str(question or "").strip()
+    existing = question_text.lower()
+    missing_urls = [url for url in urls if url.lower() not in existing]
+    if not missing_urls:
+        return question_text
+    source_lines = "\n".join(f"{idx}. {url}" for idx, url in enumerate(missing_urls, start=1))
+    source_section = (
+        "Source URLs provided by the benchmark. Use the visit tool on these URLs "
+        "when they are relevant:\n"
+        f"{source_lines}"
+    )
+    if question_text:
+        return f"{question_text}\n\n{source_section}"
+    return source_section
+
+
 def set_global_prompts(system_prompt):
     """
     Set global prompt variable for API processors.
@@ -60,7 +99,7 @@ def parse_and_load_multiple_images(sample, args, save_dir):
             - user_content_list: list of content items for API message (images + text)
         Returns (None, None, None, None) if image loading fails
     """
-    question = sample.get('problem', sample.get('question', ''))
+    question = _append_source_urls(sample.get('problem', sample.get('question', '')), sample)
     image_paths = sample.get('images', [])
     
     # Count <image> placeholders in question
@@ -229,7 +268,60 @@ def _extract_responses_from_node(node):
     return conversation_history, assistant_responses
 
 
-def _evaluate_trajectory(question, ground_truth, conversation_history, assistant_responses, question_id):
+def _looks_like_non_answer(text):
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return True, "empty final answer"
+    if lowered.startswith("error:"):
+        return True, "final answer is an error"
+    non_answer_markers = [
+        "<tool_call",
+        "</tool_call>",
+        '"tool_name"',
+        '"name"',
+        "code_interpreter",
+        "web_search",
+        "image_search",
+        "visit",
+        "zoom",
+        "reached max turns",
+        "without a definitive answer",
+        "could not parse model response",
+        "api attempts failed",
+    ]
+    if any(marker in lowered for marker in non_answer_markers):
+        return True, "final answer is a tool call, parser failure, or unfinished rollout"
+    return False, ""
+
+
+def _extract_final_answer_for_scoring(final_answer):
+    """Return a concrete answer string for scoring, or (None, reason)."""
+    text = str(final_answer or "").strip()
+    if not text:
+        return None, "empty final answer"
+    if text.lower().startswith("error:"):
+        return None, "final answer is an error"
+
+    answer_matches = re.findall(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.IGNORECASE | re.DOTALL)
+    if answer_matches:
+        candidate = answer_matches[-1].strip()
+        is_non_answer, reason = _looks_like_non_answer(candidate)
+        return (None, reason) if is_non_answer else (candidate, "")
+
+    final_match = re.search(r"(?:final\s+answer|answer)\s*(?::|\uff1a)\s*(.+)", text, flags=re.IGNORECASE | re.DOTALL)
+    if final_match:
+        candidate = final_match.group(1).strip()
+        is_non_answer, reason = _looks_like_non_answer(candidate)
+        return (None, reason) if is_non_answer else (candidate, "")
+
+    is_non_answer, reason = _looks_like_non_answer(text)
+    if is_non_answer:
+        return None, reason
+
+    return text, ""
+
+
+def _evaluate_trajectory(question, ground_truth, conversation_history, assistant_responses, question_id, final_answer=None):
     """
     Evaluate trajectory and compute scores.
     
@@ -253,6 +345,14 @@ def _evaluate_trajectory(question, ground_truth, conversation_history, assistant
     )
     if has_verifier_endpoint:
         if ground_truth:
+            prediction_for_scoring, blocked_reason = _extract_final_answer_for_scoring(final_answer)
+            if not prediction_for_scoring:
+                trajectory_analysis = (
+                    "Evaluation forced to 0.0 because the rollout did not produce a concrete final answer: "
+                    f"{blocked_reason}."
+                )
+                return accuracy_score, trajectory_score, trajectory_analysis, trajectory_text
+
             extra_info = {
                 "acc_reward_weight": 1.0,
                 "gpt_extract_answer": True,
@@ -261,7 +361,7 @@ def _evaluate_trajectory(question, ground_truth, conversation_history, assistant
             try:
                 accuracy_score, analysis = compute_score(
                     prompt=question,
-                    predict_str_list=assistant_responses,
+                    predict_str_list=[prediction_for_scoring],
                     ground_truth=ground_truth,
                     extra_info=extra_info
                 )
@@ -491,7 +591,7 @@ def _process_single_sample_unified(sample, args, sampling_params):
         # Extract responses and evaluate
         conversation_history, assistant_responses = _extract_responses_from_node(final_node)
         accuracy_score, trajectory_score, trajectory_analysis, trajectory_text = _evaluate_trajectory(
-            question_text, ground_truth, conversation_history, assistant_responses, question_id
+            question_text, ground_truth, conversation_history, assistant_responses, question_id, final_answer=final_answer
         )
         
         # Build result dict
