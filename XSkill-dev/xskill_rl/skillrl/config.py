@@ -60,6 +60,9 @@ class SkillRLGRPOConfig:
     val_before_train: bool = True
     val_only: bool = False
     resume_mode: str = "auto"
+    val_rollout_n: Optional[int] = None
+    val_do_sample: Optional[bool] = None
+    val_temperature: Optional[float] = None
     validation_data_dir: Optional[str] = None
     rollout_data_dir: Optional[str] = None
     log_val_generations: int = 0
@@ -134,6 +137,12 @@ class SkillRLGRPOConfig:
             f"trainer.resume_mode={self.resume_mode}",
             f"trainer.log_val_generations={self.log_val_generations}",
         ]
+        if self.val_rollout_n is not None:
+            overrides.append(f"actor_rollout_ref.rollout.val_kwargs.n={self.val_rollout_n}")
+        if self.val_do_sample is not None:
+            overrides.append(f"actor_rollout_ref.rollout.val_kwargs.do_sample={str(self.val_do_sample)}")
+        if self.val_temperature is not None:
+            overrides.append(f"actor_rollout_ref.rollout.val_kwargs.temperature={self.val_temperature}")
         if self.validation_data_dir:
             overrides.append(f"trainer.validation_data_dir={self.validation_data_dir}")
         if self.rollout_data_dir:

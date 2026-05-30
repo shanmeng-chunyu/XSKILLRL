@@ -184,6 +184,10 @@ def _build_case_command(
         str(args.gradient_accumulation_steps),
         "--group-size",
         str(args.group_size),
+        "--val-rollout-n",
+        str(args.val_rollout_n),
+        "--val-temperature",
+        str(args.val_temperature),
         "--n-gpus-per-node",
         str(args.n_gpus_per_node),
         "--nnodes",
@@ -252,6 +256,10 @@ def _build_case_command(
         cmd.append("--enable-tools")
     else:
         cmd.append("--no-enable-tools")
+    if args.val_do_sample:
+        cmd.append("--val-do-sample")
+    else:
+        cmd.append("--no-val-do-sample")
     if args.rollout_max_model_len is not None:
         cmd.extend(["--rollout-max-model-len", str(args.rollout_max_model_len)])
     if args.rollout_max_num_batched_tokens is not None:
@@ -307,6 +315,9 @@ def _build_suite(args: argparse.Namespace) -> dict[str, Any]:
             "n_gpus_per_node": args.n_gpus_per_node,
             "val_batch_size": args.val_batch_size,
             "group_size": args.group_size,
+            "val_rollout_n": args.val_rollout_n,
+            "val_do_sample": args.val_do_sample,
+            "val_temperature": args.val_temperature,
             "max_steps": args.max_steps,
             "max_prompt_length": args.max_prompt_length,
             "max_response_length": args.max_response_length,
@@ -401,6 +412,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ppo-mini-batch-size", type=int, default=16)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
     parser.add_argument("--group-size", type=int, default=4)
+    parser.add_argument(
+        "--val-rollout-n",
+        type=int,
+        default=None,
+        help=(
+            "Validation trajectories per sample. Defaults to --group-size. "
+            "This is separate from --max-steps, which controls multi-turn dialogue length."
+        ),
+    )
+    parser.add_argument("--val-do-sample", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--val-temperature", type=float, default=0.4)
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--max-prompt-length", type=int, default=16000)
     parser.add_argument("--max-response-length", type=int, default=2048)
@@ -450,6 +472,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Print commands and manifest without writing output files.")
     args = parser.parse_args()
 
+    if args.val_rollout_n is None:
+        args.val_rollout_n = args.group_size
+    if args.val_rollout_n <= 0:
+        raise SystemExit("--val-rollout-n must be positive")
     if args.max_steps <= 1 and args.enable_tools:
         raise SystemExit("--max-steps must be greater than 1 when tools are enabled for multi-turn evaluation")
     if args.n_gpus_per_node != 1:

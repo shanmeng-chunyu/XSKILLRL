@@ -239,6 +239,14 @@ Important defaults:
 
 - Evaluation uses `trainer.val_only=True`; it does not train.
 - Evaluation uses the multi-turn environment rollout path with `env.max_steps=20`.
+  This is the maximum dialogue/tool-interaction step count per trajectory.
+- Evaluation explicitly sets `actor_rollout_ref.rollout.val_kwargs.n=group_size`
+  by default (`group_size=4`). This is the number of validation trajectories per
+  sample, not the dialogue turn limit. Override it with `--val-rollout-n`.
+- Evaluation uses sampled validation rollouts by default:
+  `actor_rollout_ref.rollout.val_kwargs.do_sample=True` and
+  `actor_rollout_ref.rollout.val_kwargs.temperature=0.4`. Override them with
+  `--no-val-do-sample` or `--val-temperature`.
 - Tools are enabled by default: `web_search,visit,image_search,code_interpreter,zoom`.
 - Generated scripts default to portable server mode. They do not contain conda
   activation; run them after activating the desired `skillrl` environment.

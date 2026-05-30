@@ -318,6 +318,22 @@ def main() -> None:
     parser.add_argument("--val-only", action="store_true")
     parser.add_argument("--val-before-train", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--resume-mode", default="auto")
+    parser.add_argument(
+        "--val-rollout-n",
+        type=int,
+        default=None,
+        help=(
+            "Number of validation trajectories sampled per input. This is not the "
+            "multi-turn dialogue limit; use --max-steps for that."
+        ),
+    )
+    parser.add_argument(
+        "--val-do-sample",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override actor_rollout_ref.rollout.val_kwargs.do_sample for validation.",
+    )
+    parser.add_argument("--val-temperature", type=float, default=None)
     parser.add_argument("--validation-data-dir", default=None)
     parser.add_argument("--rollout-data-dir", default=None)
     parser.add_argument("--log-val-generations", type=int, default=0)
@@ -359,8 +375,12 @@ def main() -> None:
             args.n_gpus_per_node = 1
         if args.cuda_visible_devices is None:
             args.cuda_visible_devices = "0"
+        if args.enable_tools and args.max_steps <= 1:
+            raise SystemExit("--max-steps must be greater than 1 for tool-enabled multi-turn validation")
     elif args.n_gpus_per_node is None:
         args.n_gpus_per_node = 8
+    if args.val_rollout_n is not None and args.val_rollout_n <= 0:
+        raise SystemExit("--val-rollout-n must be positive")
 
     if args.gradient_accumulation_steps <= 0:
         raise SystemExit("--gradient-accumulation-steps must be positive")
@@ -461,6 +481,9 @@ def main() -> None:
         val_before_train=args.val_before_train,
         val_only=args.val_only,
         resume_mode=args.resume_mode,
+        val_rollout_n=args.val_rollout_n,
+        val_do_sample=args.val_do_sample,
+        val_temperature=args.val_temperature,
         validation_data_dir=validation_data_dir,
         rollout_data_dir=rollout_data_dir,
         log_val_generations=args.log_val_generations,
