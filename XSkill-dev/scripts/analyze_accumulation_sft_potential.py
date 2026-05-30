@@ -29,6 +29,8 @@ from typing import Any, Iterable
 
 
 DEFAULT_ACCUM_DIR = "/sata/luzy/XSKILLRL/XSkill-dev/output/xskill_accum/qwen3vl8b_mixed_train_core_seed42"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DATA_FILE = PROJECT_ROOT / "benchmark" / "_mixed_protocol" / "train_core.json"
 
 
 @dataclass
@@ -371,13 +373,14 @@ def summarize(sample_dirs: list[Path], rollouts: list[RolloutStats]) -> dict[str
     }
 
 
-def summarize_by_benchmark(rollouts: list[RolloutStats]) -> list[dict[str, Any]]:
+def summarize_by_benchmark(rollouts: list[RolloutStats], benchmark_counts: Counter) -> list[dict[str, Any]]:
     groups: dict[str, list[RolloutStats]] = defaultdict(list)
     for rollout in rollouts:
         groups[rollout.benchmark or "unknown"].append(rollout)
 
     rows = []
-    for benchmark, group in sorted(groups.items()):
+    for benchmark in sorted(set(groups) | set(benchmark_counts)):
+        group = groups.get(benchmark, [])
         completed = [r for r in group if r.completed]
         successful = [r for r in group if r.success]
         sample_ids = {r.sample_id for r in group}
@@ -388,16 +391,28 @@ def summarize_by_benchmark(rollouts: list[RolloutStats]) -> list[dict[str, Any]]
             (sum(1 for r in group if r.sample_id == sid) for sid in sample_ids),
             default=0,
         )
+        input_samples = benchmark_counts.get(benchmark, 0)
+        completed_rollout_count = len(completed)
+        successful_rollout_count = len(successful)
         rows.append(
             {
                 "benchmark": benchmark,
+                "input_samples": input_samples or "",
                 "samples": len(sample_ids),
+                "missing_samples": max(input_samples - len(sample_ids), 0) if input_samples else "",
                 "completed_samples": len(completed_sample_ids),
                 "success_samples": len(success_sample_ids),
+                "sample_completion_rate": round(len(completed_sample_ids) / input_samples, 6) if input_samples else "",
+                "sample_success_rate": round(len(success_sample_ids) / len(sample_ids), 6) if sample_ids else 0.0,
                 "rollouts": len(group),
                 "completed_rollouts": len(completed),
                 "successful_rollouts": len(successful),
+                "rollout_completion_rate": round(completed_rollout_count / len(group), 6) if group else 0.0,
+                "rollout_success_rate": round(successful_rollout_count / completed_rollout_count, 6) if completed_rollout_count else 0.0,
                 "estimated_sft_samples": sum(r.sft_samples for r in successful),
+                "assistant_turns_success_mean": round(mean([r.assistant_turns for r in successful]), 4) if successful else 0.0,
+                "sft_samples_per_success_mean": round(mean([r.sft_samples for r in successful]), 4) if successful else 0.0,
+                "tool_calls_total": sum(r.tool_calls for r in group),
                 "tool_calls_in_successful_rollouts": sum(r.tool_calls for r in successful),
                 "rollout_accuracy_mean": round(mean(accuracies), 6) if accuracies else 0.0,
                 "pass@k": round(len(success_sample_ids) / len(sample_ids), 6) if sample_ids else 0.0,
@@ -422,12 +437,17 @@ def print_benchmark_summary(rows: list[dict[str, Any]]) -> None:
     print("\n=== By Benchmark ===")
     headers = [
         "benchmark",
+        "input_samples",
         "samples",
+        "missing_samples",
         "success_samples",
+        "sample_success_rate",
         "successful_rollouts",
+        "rollout_success_rate",
         "estimated_sft_samples",
         "rollout_accuracy_mean",
         "pass@k",
+        "tool_calls_total",
         "tool_calls_in_successful_rollouts",
     ]
     widths = {
@@ -508,7 +528,10 @@ def main() -> None:
     args = parser.parse_args()
 
     accum_dir = Path(args.accum_dir).expanduser()
-    sample_lookup, benchmark_counts = build_sample_lookup(args.data_file)
+    data_files = list(args.data_file or [])
+    if not data_files and DEFAULT_DATA_FILE.exists():
+        data_files = [str(DEFAULT_DATA_FILE)]
+    sample_lookup, benchmark_counts = build_sample_lookup(data_files)
     sample_dirs = discover_sample_dirs(accum_dir)
     rollouts: list[RolloutStats] = []
     for sample_dir in sample_dirs:
@@ -525,7 +548,7 @@ def main() -> None:
             )
 
     summary = summarize(sample_dirs, rollouts)
-    benchmark_rows = summarize_by_benchmark(rollouts)
+    benchmark_rows = summarize_by_benchmark(rollouts, benchmark_counts)
     if benchmark_counts:
         summary["input_data_benchmark_counts"] = dict(sorted(benchmark_counts.items()))
     successful = [r for r in rollouts if r.success]

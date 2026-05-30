@@ -61,7 +61,9 @@ class WebSearch(BaseTool):
             )
 
         self.max_results_default = config.get('max_results', 10) if config else 10
-        self.timeout = config.get('timeout', 30) if config else 30
+        timeout_value = config.get("timeout") or os.getenv("BOCHA_SEARCH_TIMEOUT") or 30
+        self.timeout = int(timeout_value)
+        self.max_retries = int(config.get("max_retries") or os.getenv("BOCHA_SEARCH_MAX_RETRIES") or 3)
         
         # Proxy configuration (read from environment variable)
         self.proxies = None
@@ -100,7 +102,7 @@ class WebSearch(BaseTool):
             return "Error: No search query provided"
         
         # Retry mechanism
-        max_retries = 3
+        max_retries = self.max_retries
         retry_delay = 1
         
         for attempt in range(max_retries):

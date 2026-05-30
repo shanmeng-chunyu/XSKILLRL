@@ -157,3 +157,125 @@ python scripts/cleanup_error_scored_samples.py \
 ```
 
 Use `--quarantine-dir output/quarantine_error_scored_samples` instead of `--delete` if you want to keep a copy of the matched sample directories.
+
+## 9. Output Benchmark Accuracy Report
+
+To inspect accuracy by benchmark from an accumulation/evaluation output
+directory, use:
+
+```bash
+python scripts/analyze_output_benchmark_accuracy.py \
+  --output-dir output/xskill_accum/qwen3vl8b_mixed_train_core_seed42 \
+  --data-file benchmark/_mixed_protocol/train_core.json \
+  --k 4 \
+  --json-output output/benchmark_accuracy_report.json \
+  --benchmark-csv-output output/benchmark_accuracy_report.csv \
+  --sample-csv-output output/sample_accuracy_report.csv
+```
+
+The script is read-only. It can read both multi-rollout outputs with
+`metrics_sample.json` plus `rollout_*/metrics.json`, and single-rollout outputs
+with `metrics.json` directly under each sample directory. If `--data-file` is
+provided, the report also shows expected and missing sample counts per
+benchmark.
+
+## 10. Full Accumulation Run Summary
+
+After accumulation finishes, use the following command to organize the run into
+Markdown, JSON, and CSV reports:
+
+```bash
+python scripts/summarize_accumulation_run.py \
+  --output-dir output/xskill_accum/qwen3vl8b_mixed_train_core_seed42 \
+  --data-file benchmark/_mixed_protocol/train_core.json \
+  --memory-dir memory_bank/test \
+  --api-timings output/xskill_accum/qwen3vl8b_mixed_train_core_seed42/api_timings.jsonl \
+  --k 4 \
+  --write-default-reports
+```
+
+Default reports are written to:
+
+```text
+output/accumulation_reports/qwen3vl8b_mixed_train_core_seed42/
+```
+
+The report includes overall pass/average metrics, per-benchmark accuracy,
+failure categories, memory-bank counts, optional API timing summaries, and
+per-sample/per-rollout CSV files. Without output arguments, the script only
+prints the Markdown summary and does not write files.
+
+## 11. Global Val Evaluation Suite
+
+Use one command to build comparable validation scripts for Base / SFT / RL,
+with and without runtime SkillBank retrieval:
+
+```bash
+cd /sata/luzy/XSKILLRL/XSkill-dev
+
+python scripts/build_skillrl_eval_suite.py \
+  --global-val-json benchmark/_mixed_protocol/global_val.json \
+  --base-model-path /sata/luzy/models/Qwen3-VL-8B-Instruct \
+  --sft-model-path /sata/luzy/XSKILLRL/SkillRL/checkpoints/xskill_sft/qwen3vl8b_sft/global_step_x \
+  --rl-model-path /sata/luzy/XSKILLRL/SkillRL/checkpoints/xskill_skillrl/xskill_grpo_skills/hf_checkpoint \
+  --skill-bank-json memory_bank/test/skillrl_skill_bank.json \
+  --cuda-visible-devices 0 \
+  --output-dir output/eval_runs
+```
+
+The generated scripts are:
+
+- `base_no_skill_val.sh`
+- `base_with_skill_val.sh`
+- `sft_no_skill_val.sh`
+- `sft_with_skill_val.sh`
+- `rl_no_skill_val.sh`
+- `rl_with_skill_val.sh`
+
+If `--sft-model-path` or `--rl-model-path` is omitted, the corresponding SFT/RL
+evaluation scripts are skipped and recorded in `output/eval_runs/eval_suite_manifest.json`.
+
+Important defaults:
+
+- Evaluation uses `trainer.val_only=True`; it does not train.
+- Evaluation uses the multi-turn environment rollout path with `env.max_steps=20`.
+- Tools are enabled by default: `web_search,visit,image_search,code_interpreter,zoom`.
+- Generated scripts default to portable server mode. They do not contain conda
+  activation; run them after activating the desired `skillrl` environment.
+- SkillBank comparison is runtime-only. The exported `global_val_eval.parquet`
+  does not contain offline injected skill prompts.
+- With-skill and no-skill scripts use the same data and tool settings; only the
+  `env.use_skills_only_memory` / `env.skills_only_memory.*` settings differ.
+
+Run a generated script directly on the server:
+
+```bash
+cd /sata/luzy/XSKILLRL
+export BOCHA_API_KEY=your_bocha_key
+bash XSkill-dev/output/eval_runs/base_with_skill_val.sh
+```
+
+If the parquet was already exported and you only want to regenerate `.sh`
+launchers, add `--skip-data-export`.
+
+The generated scripts set `SEARCH_API_PROVIDER=bocha`,
+`IMAGE_SEARCH_PROVIDER=bocha`, and `VISIT_BACKEND=local` by default. If
+`web_search` or `image_search` is enabled, the script exits early when
+`BOCHA_API_KEY` is missing. It also checks that every enabled tool is registered
+before starting SkillRL validation. If `code_interpreter` or `zoom` is missing,
+install the Jupyter kernel dependencies in the active environment:
+
+```bash
+pip install jupyter_client ipykernel pyzmq
+```
+
+After running an evaluation script, check the experiment record and validation
+dump under:
+
+```text
+SkillRL/checkpoints/xskill_eval/<run_name>/
+```
+
+The validation metrics should include `val/<benchmark>/tool_call_count/mean`.
+Whether this value is greater than zero depends on whether the model emits a
+valid `<tool_call>...</tool_call>` during evaluation.

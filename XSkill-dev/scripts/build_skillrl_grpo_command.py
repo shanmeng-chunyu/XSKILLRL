@@ -40,6 +40,7 @@ def _write_portable_script(
     python_executable: str,
     cuda_visible_devices: str | None = None,
     extra_overrides: list[str] | None = None,
+    preserve_proxy_env: bool = False,
 ) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     overrides = [*config.to_hydra_overrides(), *(extra_overrides or [])]
@@ -50,7 +51,11 @@ def _write_portable_script(
         "export TOKENIZERS_PARALLELISM=false",
         "unset ROCR_VISIBLE_DEVICES || true",
         "unset HIP_VISIBLE_DEVICES || true",
-        "unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy || true",
+        (
+            "# Preserve proxy environment for search/visit APIs."
+            if preserve_proxy_env
+            else "unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy || true"
+        ),
         "",
         'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
         'XSKILL_REPO_ROOT="${XSKILL_REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"',
@@ -64,7 +69,7 @@ def _write_portable_script(
         "  fi",
         "fi",
         'export XSKILL_REPO_ROOT XSKILL_IMAGE_ROOT',
-        'export PYTHONPATH="${XSKILL_REPO_ROOT}:${PYTHONPATH:-}"',
+        'export PYTHONPATH="${XSKILL_REPO_ROOT}:${XSKILL_REPO_ROOT}/eval:${PYTHONPATH:-}"',
         ': "${XSKILL_RL_IMAGE_MAX_PIXELS:=1048576}"',
         ': "${XSKILL_RL_IMAGE_MIN_MAX_PIXELS:=262144}"',
         ': "${XSKILL_RL_IMAGE_MIN_PIXELS:=16384}"',
@@ -107,6 +112,7 @@ def _write_compute_node_script(
     monorepo_root: str,
     model_path: str,
     extra_overrides: list[str] | None = None,
+    preserve_proxy_env: bool = False,
 ) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     script_config = replace(config, model_path="${MODEL_PATH}")
@@ -139,7 +145,11 @@ def _write_compute_node_script(
         "",
         "unset ROCR_VISIBLE_DEVICES || true",
         "unset HIP_VISIBLE_DEVICES || true",
-        "unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy || true",
+        (
+            "# Preserve proxy environment for search/visit APIs."
+            if preserve_proxy_env
+            else "unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy || true"
+        ),
         "",
         f'export MONOREPO_ROOT="${{MONOREPO_ROOT:-{monorepo_root}}}"',
         f'export XSKILL_REPO_ROOT="${{XSKILL_REPO_ROOT:-{monorepo_root}/XSkill-dev}}"',
@@ -152,7 +162,7 @@ def _write_compute_node_script(
         "  fi",
         "fi",
         f'export MODEL_PATH="${{MODEL_PATH:-{model_path}}}"',
-        f'export PYTHONPATH="{skillrl_root}:{xskill_root}:${{PYTHONPATH:-}}"',
+        f'export PYTHONPATH="{skillrl_root}:{xskill_root}:{xskill_root}/eval:${{PYTHONPATH:-}}"',
         ': "${XSKILL_RL_IMAGE_MAX_PIXELS:=1048576}"',
         ': "${XSKILL_RL_IMAGE_MIN_MAX_PIXELS:=262144}"',
         ': "${XSKILL_RL_IMAGE_MIN_PIXELS:=16384}"',
@@ -332,6 +342,12 @@ def main() -> None:
     parser.add_argument("--compute-conda-env", default="/data/home/scwb693/.conda/envs/skillrl")
     parser.add_argument("--compute-monorepo-root", default="/data/home/scwb693/run/luzy/XSKILLRL")
     parser.add_argument(
+        "--preserve-proxy-env",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Do not unset HTTP_PROXY/HTTPS_PROXY/ALL_PROXY in generated bash scripts.",
+    )
+    parser.add_argument(
         "--cuda-visible-devices",
         default=None,
         help="Optional CUDA_VISIBLE_DEVICES line to embed in the generated bash script.",
@@ -470,6 +486,7 @@ def main() -> None:
                 monorepo_root=args.compute_monorepo_root,
                 model_path=args.model_path,
                 extra_overrides=extra_overrides,
+                preserve_proxy_env=args.preserve_proxy_env,
             )
         elif args.portable_output_script:
             _write_portable_script(
@@ -478,6 +495,7 @@ def main() -> None:
                 python_executable=args.python_executable,
                 cuda_visible_devices=args.cuda_visible_devices,
                 extra_overrides=extra_overrides,
+                preserve_proxy_env=args.preserve_proxy_env,
             )
         else:
             target.parent.mkdir(parents=True, exist_ok=True)

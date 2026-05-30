@@ -33,6 +33,13 @@ TOOL_PROTOCOL = """
 You may use tools when external information, webpage reading, OCR, image inspection, or calculation is needed.
 Call exactly one tool at a time using this format:
 <tool_call>{"name":"web_search","arguments":{"query":"search terms","max_results":5}}</tool_call>
+Qwen XML tool calls are also accepted:
+<tool_call>
+<function=web_search>
+<parameter=query>search terms</parameter>
+<parameter=max_results>5</parameter>
+</function>
+</tool_call>
 
 Available tools:
 - web_search: {"query": "...", "max_results": 5}
@@ -355,6 +362,7 @@ class XSkillVisualQAEnvironment:
         for pattern in [
             r"<tool_call>(.*?)</tool_call>",
             r"<tool>(.*?)</tool>",
+            r"<function_calls>(.*?)</function_calls>",
             r"```(?:json)?\s*(\{.*?\"(?:name|tool_name)\".*?\})\s*```",
         ]:
             match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
@@ -375,6 +383,9 @@ class XSkillVisualQAEnvironment:
 
     def _parse_tool_payload(self, payload: str) -> Optional[Dict[str, Any]]:
         payload = payload.strip()
+        qwen_xml = self._parse_qwen_xml_tool_payload(payload)
+        if qwen_xml:
+            return qwen_xml
         try:
             data = json.loads(payload)
         except Exception:
@@ -393,6 +404,51 @@ class XSkillVisualQAEnvironment:
         if not name:
             return None
         return {"type": "tool_call", "name": str(name), "arguments": arguments}
+
+    def _parse_qwen_xml_tool_payload(self, payload: str) -> Optional[Dict[str, Any]]:
+        """Parse Qwen-style XML function calls emitted by local vLLM rollouts."""
+
+        text = str(payload or "").strip()
+        if not text:
+            return None
+
+        tool_match = re.search(r"<tool_call>(.*?)</tool_call>", text, flags=re.IGNORECASE | re.DOTALL)
+        if tool_match:
+            text = tool_match.group(1).strip()
+
+        function_match = re.search(
+            r"<function=([A-Za-z_][\w.-]*)\s*>(.*?)</function>",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not function_match:
+            function_match = re.search(
+                r"<function\s+name=[\"']?([A-Za-z_][\w.-]*)[\"']?\s*>(.*?)</function>",
+                text,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        if not function_match:
+            return None
+
+        name = function_match.group(1).strip()
+        body = function_match.group(2)
+        arguments: Dict[str, Any] = {}
+        for param_match in re.finditer(
+            r"<parameter=([A-Za-z_][\w.-]*)\s*>(.*?)</parameter>",
+            body,
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            key = param_match.group(1).strip()
+            arguments[key] = _parse_scalar(param_match.group(2).strip())
+        for param_match in re.finditer(
+            r"<parameter\s+name=[\"']?([A-Za-z_][\w.-]*)[\"']?\s*>(.*?)</parameter>",
+            body,
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            key = param_match.group(1).strip()
+            arguments[key] = _parse_scalar(param_match.group(2).strip())
+
+        return {"type": "tool_call", "name": name, "arguments": arguments}
 
     def _parse_arguments(self, raw_args: str) -> Dict[str, Any]:
         raw_args = str(raw_args or "").strip()
@@ -886,6 +942,29 @@ def _extract_answer(response: str) -> str:
         if match:
             return match.group(1).strip()
     return text
+
+
+def _parse_scalar(value: str) -> Any:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    lowered = text.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if lowered in {"none", "null"}:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text
 
 
 def _normalize_answer(value: str) -> str:

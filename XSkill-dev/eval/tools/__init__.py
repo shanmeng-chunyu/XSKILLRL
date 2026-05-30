@@ -8,33 +8,33 @@ from .tool_registry import TOOL_REGISTRY, register_tool, get_tool, list_tools, g
 
 try:
     from .code_interpreter import CodeInterpreter
-except ImportError:
+except ImportError as exc:
     CodeInterpreter = None
-    print("Warning: CodeInterpreter not available")
+    print(f"Warning: CodeInterpreter not available: {exc}")
 
 try:
     from .web_search import WebSearch
-except ImportError:
+except ImportError as exc:
     WebSearch = None
-    print("Warning: WebSearch not available")
+    print(f"Warning: WebSearch not available: {exc}")
 
 try:
     from .visit import Visit
-except ImportError:
+except ImportError as exc:
     Visit = None
-    print("Warning: Visit not available")
+    print(f"Warning: Visit not available: {exc}")
 
 try:
     from .image_search import ImageSearch
-except ImportError:
+except ImportError as exc:
     ImageSearch = None
-    print("Warning: ImageSearch not available")
+    print(f"Warning: ImageSearch not available: {exc}")
 
 try:
     from .zoom import ZoomTool
-except ImportError:
+except ImportError as exc:
     ZoomTool = None
-    print("Warning: ZoomTool not available")
+    print(f"Warning: ZoomTool not available: {exc}")
 
 
 __all__ = [

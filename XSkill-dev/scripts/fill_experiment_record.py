@@ -214,9 +214,11 @@ def count_exp_items(output_dir: Path) -> int:
             total += len(items)
         elif isinstance(items, dict):
             for key in ("experiences", "items", "ops"):
-                if isinstance(items.get(key), list):
+                if isinstance(items.get(key), (list, dict)):
                     total += len(items[key])
                     break
+            else:
+                total += len(items)
     return total
 
 
@@ -231,7 +233,7 @@ def count_experience_library(path: Path) -> int | None:
         return len(data)
     if isinstance(data, dict):
         for key in ("experiences", "items", "data"):
-            if isinstance(data.get(key), list):
+            if isinstance(data.get(key), (list, dict)):
                 return len(data[key])
         return len(data)
     return None
