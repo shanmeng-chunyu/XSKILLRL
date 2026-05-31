@@ -1,6 +1,6 @@
 # XSKILLRL
 
-This repository is organized as a two-part research workspace:
+This repository is organized as a monorepo-style research workspace:
 
 ```text
 .
@@ -8,9 +8,37 @@ This repository is organized as a two-part research workspace:
 +-- SkillRL/      # SkillRL/verl trainer code with an XSkill environment entry point
 ```
 
-Use `XSkill-dev/` to prepare benchmark splits, export SkillRL/GRPO records, and build the launch command. Use `SkillRL/` on the remote training server to run the generated `python -m verl.trainer.main_ppo ...` command.
+Use `XSkill-dev/` to prepare benchmark splits, run XSkill accumulation, export SFT/GRPO records, and build launch scripts. Use `SkillRL/` to run the generated SFT, GRPO, and validation commands.
 
 The XSkill inference and memory path remains under `XSkill-dev/eval/`. The SkillRL integration is added as an external RL bridge so XSkill baseline functionality is kept separate from parameter training.
+
+## Quick Start
+
+Commands below assume the current directory is the repository root:
+
+```bash
+cd XSkill-dev
+```
+
+Prepare or copy local resources that are intentionally not tracked by Git:
+
+- model weights, for example `../models/Qwen3-VL-8B-Instruct`
+- benchmark images, for example `../images` or `benchmark/...`
+- generated memory banks under `memory_bank/`
+- generated parquet/jsonl files under `output/`
+- checkpoints under `../SkillRL/checkpoints/`
+
+The main workflow is:
+
+1. Prepare benchmark splits under `benchmark/`.
+2. Build `benchmark/_mixed_protocol/train_core.json` and `global_val.json`.
+3. Run XSkill accumulation with `eval/run_exskill_train.sh`.
+4. Convert accumulated skills to `memory_bank/test/skillrl_skill_bank.json`.
+5. Export SFT or GRPO data under `output/`.
+6. Generate portable launch scripts under `output/sft_runs/`, `output/rl_runs/`, or `output/eval_runs/`.
+7. Run the generated scripts from the repository root after activating the target environment.
+
+Detailed commands are in [XSkill-dev/docs/XSKILL_SKILLRL_USAGE_CN.md](XSkill-dev/docs/XSKILL_SKILLRL_USAGE_CN.md).
 
 ## Current Integration Notes
 
@@ -20,4 +48,4 @@ The XSkill inference and memory path remains under `XSkill-dev/eval/`. The Skill
   - `cleanup_error_scored_samples.py` for removing old samples where an error final answer was incorrectly scored as `1.0`.
   - `cleanup_mmbrowse_source_outputs.py` for removing MMBrowseComp source-URL samples after prompt-format changes.
 
-Runtime outputs, generated data, memory banks, checkpoints, and downloaded benchmark assets remain intentionally ignored by git.
+Runtime outputs, generated data, memory banks, checkpoints, and downloaded benchmark assets remain intentionally ignored by Git.

@@ -687,6 +687,41 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
+    def _dump_validation_trajectories(self, inputs, trajectories, summaries, dump_path):
+        """Dump detailed validation-only multi-turn trajectories as JSONL."""
+        os.makedirs(dump_path, exist_ok=True)
+        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
+        n = len(trajectories)
+
+        with open(filename, "w", encoding="utf-8") as f:
+            for i in range(n):
+                steps = [
+                    step
+                    for step in (trajectories[i] or [])
+                    if step.get("parsed_action_type") != "finished" or step.get("response")
+                ]
+                summary = summaries[i] if i < len(summaries) else {}
+                first_info = steps[0] if steps else {}
+                last_info = steps[-1] if steps else {}
+                entry = {
+                    "step": self.global_steps,
+                    "input": inputs[i] if i < len(inputs) else "",
+                    "traj_uid": summary.get("traj_uid") or last_info.get("traj_uid", ""),
+                    "data_source": first_info.get("data_source")
+                    or first_info.get("benchmark_name")
+                    or "unknown",
+                    "score": float(last_info.get("task_score", summary.get("episode_reward", 0.0)) or 0.0),
+                    "episode_reward": summary.get("episode_reward", 0.0),
+                    "episode_length": summary.get("episode_length", len(steps)),
+                    "tool_calling": summary.get("tool_calling", 0.0),
+                    "final_answer": last_info.get("final_answer", ""),
+                    "ground_truth": last_info.get("ground_truth", ""),
+                    "trajectory": steps,
+                }
+                f.write(json.dumps(_json_safe(entry), ensure_ascii=False) + "\n")
+
+        print(f"Dumped validation trajectories to {filename}")
+
     def _maybe_log_val_generations(self, inputs, outputs, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
@@ -716,6 +751,8 @@ class RayPPOTrainer:
         data_source_lst = []
         tool_calling_list = []
         traj_uid_list = []
+        trajectory_infos_list = []
+        trajectory_summary_list = []
         success_rate_dict = {}
 
         # Lists to collect samples for the table
@@ -797,6 +834,9 @@ class RayPPOTrainer:
             data_source_lst.append(test_batch.non_tensor_batch.get('data_source', ['unknown'] * reward_tensor.shape[0]))
             tool_calling_list.append(test_output_gen_batch.non_tensor_batch['tool_callings'])
             traj_uid_list.append(test_output_gen_batch.non_tensor_batch['traj_uid'])
+            if self.config.trainer.get("val_only", False) and self.config.trainer.get("validation_trajectory_dir", None):
+                trajectory_infos_list.extend(test_output_gen_batch.meta_info.get("validation_trajectory_infos", []))
+                trajectory_summary_list.extend(test_output_gen_batch.meta_info.get("validation_trajectory_summary", []))
             # success rate
             for k in test_batch.non_tensor_batch.keys():
                 if 'success_rate' in k:
@@ -825,6 +865,18 @@ class RayPPOTrainer:
                     "traj_uid": traj_uids.tolist(),
                 },
                 dump_path=validation_data_dir,
+            )
+        validation_trajectory_dir = self.config.trainer.get("validation_trajectory_dir", None)
+        if (
+            validation_trajectory_dir
+            and self.config.trainer.get("val_only", False)
+            and trajectory_infos_list
+        ):
+            self._dump_validation_trajectories(
+                inputs=sample_inputs,
+                trajectories=trajectory_infos_list,
+                summaries=trajectory_summary_list,
+                dump_path=validation_trajectory_dir,
             )
         success_rate = {k: np.mean(v) for k, v in success_rate_dict.items()}
 

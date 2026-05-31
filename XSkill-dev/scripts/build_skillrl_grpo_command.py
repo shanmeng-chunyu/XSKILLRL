@@ -127,11 +127,17 @@ def _write_compute_node_script(
         "export TOKENIZERS_PARALLELISM=false",
         "export PYTHONNOUSERSITE=1",
         "",
-        f"source {conda_init}",
+        'CONDA_INIT_SCRIPT="${CONDA_INIT_SCRIPT:-' + conda_init + '}"',
+        'if [[ -n "${CONDA_INIT_SCRIPT}" && -f "${CONDA_INIT_SCRIPT}" ]]; then',
+        '  source "${CONDA_INIT_SCRIPT}"',
+        "elif command -v conda >/dev/null 2>&1; then",
+        '  eval "$(conda shell.bash hook)"',
+        "else",
+        '  echo "conda is not available; set CONDA_INIT_SCRIPT or load conda before running this script" >&2',
+        "  exit 1",
+        "fi",
         f"conda activate {conda_env}",
-        "",
-        f'export PATH="{conda_env}/bin:${{PATH}}"',
-        f'PYTHON_BIN="{conda_env}/bin/python"',
+        'PYTHON_BIN="$(command -v python)"',
         "",
         'echo "CONDA_PREFIX=${CONDA_PREFIX:-}"',
         'echo "PYTHON_BIN=${PYTHON_BIN}"',
@@ -151,9 +157,16 @@ def _write_compute_node_script(
             else "unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy || true"
         ),
         "",
-        f'export MONOREPO_ROOT="${{MONOREPO_ROOT:-{monorepo_root}}}"',
-        f'export XSKILL_REPO_ROOT="${{XSKILL_REPO_ROOT:-{monorepo_root}/XSkill-dev}}"',
-        f'export SKILLRL_REPO_ROOT="${{SKILLRL_REPO_ROOT:-{monorepo_root}/SkillRL}}"',
+        'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+        'DEFAULT_XSKILL_REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"',
+        'DEFAULT_MONOREPO_ROOT="$(cd "${DEFAULT_XSKILL_REPO_ROOT}/.." && pwd)"',
+        (
+            f'export MONOREPO_ROOT="${{MONOREPO_ROOT:-{monorepo_root}}}"'
+            if monorepo_root
+            else 'export MONOREPO_ROOT="${MONOREPO_ROOT:-${DEFAULT_MONOREPO_ROOT}}"'
+        ),
+        'export XSKILL_REPO_ROOT="${XSKILL_REPO_ROOT:-${MONOREPO_ROOT}/XSkill-dev}"',
+        'export SKILLRL_REPO_ROOT="${SKILLRL_REPO_ROOT:-${MONOREPO_ROOT}/SkillRL}"',
         'if [[ -z "${XSKILL_IMAGE_ROOT:-}" ]]; then',
         '  if [[ -d "${MONOREPO_ROOT}/images" ]]; then',
         '    XSKILL_IMAGE_ROOT="${MONOREPO_ROOT}/images"',
@@ -335,6 +348,7 @@ def main() -> None:
     )
     parser.add_argument("--val-temperature", type=float, default=None)
     parser.add_argument("--validation-data-dir", default=None)
+    parser.add_argument("--validation-trajectory-dir", default=None)
     parser.add_argument("--rollout-data-dir", default=None)
     parser.add_argument("--log-val-generations", type=int, default=0)
     parser.add_argument("--project-name", default="xskill_skillrl")
@@ -345,18 +359,21 @@ def main() -> None:
     parser.add_argument(
         "--portable-output-script",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="When --output-script is used, write a bash script that resolves repo paths at runtime.",
     )
     parser.add_argument(
         "--compute-node-output-script",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="When --output-script is used, write a compute-node bash script like output/sft_runs/qwen3vl8b_sft_with_skill.sh.",
+        default=False,
+        help=(
+            "When --output-script is used, write a compute-node bash script with "
+            "conda activation. Portable scripts are the default."
+        ),
     )
-    parser.add_argument("--compute-conda-init", default="/data/apps/miniforge3/25.11.0-1/etc/profile.d/conda.sh")
-    parser.add_argument("--compute-conda-env", default="/data/home/scwb693/.conda/envs/skillrl")
-    parser.add_argument("--compute-monorepo-root", default="/data/home/scwb693/run/luzy/XSKILLRL")
+    parser.add_argument("--compute-conda-init", default="")
+    parser.add_argument("--compute-conda-env", default="skillrl")
+    parser.add_argument("--compute-monorepo-root", default="")
     parser.add_argument(
         "--preserve-proxy-env",
         action=argparse.BooleanOptionalAction,
@@ -424,6 +441,9 @@ def main() -> None:
         default_local_dir = args.default_local_dir
 
     validation_data_dir = _portable_path(args.validation_data_dir) if portable_paths else args.validation_data_dir
+    validation_trajectory_dir = (
+        _portable_path(args.validation_trajectory_dir) if portable_paths else args.validation_trajectory_dir
+    )
     rollout_data_dir = _portable_path(args.rollout_data_dir) if portable_paths else args.rollout_data_dir
     extra_overrides = []
     if not _has_config_field("val_before_train"):
@@ -436,6 +456,8 @@ def main() -> None:
         extra_overrides.append(f"trainer.log_val_generations={args.log_val_generations}")
     if validation_data_dir and not _has_config_field("validation_data_dir"):
         extra_overrides.append(f"trainer.validation_data_dir={validation_data_dir}")
+    if validation_trajectory_dir and not _has_config_field("validation_trajectory_dir"):
+        extra_overrides.append(f"trainer.validation_trajectory_dir={validation_trajectory_dir}")
     if rollout_data_dir and not _has_config_field("rollout_data_dir"):
         extra_overrides.append(f"trainer.rollout_data_dir={rollout_data_dir}")
 
@@ -485,6 +507,7 @@ def main() -> None:
         val_do_sample=args.val_do_sample,
         val_temperature=args.val_temperature,
         validation_data_dir=validation_data_dir,
+        validation_trajectory_dir=validation_trajectory_dir,
         rollout_data_dir=rollout_data_dir,
         log_val_generations=args.log_val_generations,
         project_name=args.project_name,

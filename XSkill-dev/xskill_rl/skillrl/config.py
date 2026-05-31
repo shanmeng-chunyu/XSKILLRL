@@ -23,7 +23,7 @@ class SkillRLGRPOConfig:
     image_root: Optional[str] = None
     reward_mode: str = "contains"
     env_name: str = "xskill_visual"
-    max_steps: int = 20
+    max_steps: int = 10
     enable_tools: bool = True
     enabled_tools: Optional[str] = None
     retrieval_mode: str = "template"
@@ -64,6 +64,7 @@ class SkillRLGRPOConfig:
     val_do_sample: Optional[bool] = None
     val_temperature: Optional[float] = None
     validation_data_dir: Optional[str] = None
+    validation_trajectory_dir: Optional[str] = None
     rollout_data_dir: Optional[str] = None
     log_val_generations: int = 0
     n_gpus_per_node: int = 8
@@ -145,6 +146,8 @@ class SkillRLGRPOConfig:
             overrides.append(f"actor_rollout_ref.rollout.val_kwargs.temperature={self.val_temperature}")
         if self.validation_data_dir:
             overrides.append(f"trainer.validation_data_dir={self.validation_data_dir}")
+        if self.validation_trajectory_dir:
+            overrides.append(f"trainer.validation_trajectory_dir={self.validation_trajectory_dir}")
         if self.rollout_data_dir:
             overrides.append(f"trainer.rollout_data_dir={self.rollout_data_dir}")
 

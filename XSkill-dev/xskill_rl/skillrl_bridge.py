@@ -124,19 +124,23 @@ class XSkillVisualQAEnvironment:
             tool_calling = 0.0
             next_text = "Episode finished."
             returned_images = []
+            tool_observation = ""
+            final_answer = ""
 
             if parsed["type"] == "tool_call" and self._tools_enabled():
                 tool_calling = 1.0
                 tool_result = self._execute_tool_call(parsed["name"], parsed["arguments"], state)
+                tool_observation = str(tool_result.get("observation", ""))
                 returned_images = tool_result.get("images", [])
                 next_text = self._build_followup_observation(
                     item,
                     action=action,
-                    observation=tool_result.get("observation", ""),
+                    observation=tool_observation,
                     step=state["step"],
                 )
             else:
                 response = parsed.get("answer", action)
+                final_answer = str(response)
                 reward = self._score(response, item.get("solution", ""))
                 done = True
 
@@ -144,6 +148,7 @@ class XSkillVisualQAEnvironment:
                 if not done:
                     reward = self._score(action, item.get("solution", ""))
                     done = True
+                    final_answer = _extract_answer(action)
                     next_text = "Episode finished: maximum interaction steps reached."
             state["done"] = bool(done)
 
@@ -156,10 +161,17 @@ class XSkillVisualQAEnvironment:
                     "ground_truth": item.get("solution", ""),
                     "is_action_valid": parsed["type"] != "invalid",
                     "tool_calling": float(tool_calling),
+                    "step": int(state["step"]),
+                    "reward": float(reward),
+                    "done": bool(done),
+                    "final_answer": final_answer,
                 }
             )
             if parsed["type"] == "tool_call":
                 info["tool_name"] = parsed.get("name", "")
+                info["tool_arguments"] = parsed.get("arguments", {})
+                info["tool_observation"] = _truncate_trace_text(tool_observation)
+                info["tool_returned_image_count"] = len(returned_images)
             rewards.append(reward)
             dones.append(done)
             next_texts.append(next_text)
@@ -920,6 +932,17 @@ def _as_list(value) -> List[Any]:
         except Exception:
             pass
     return [value]
+
+
+def _truncate_trace_text(value: Any) -> str:
+    text = str(value or "")
+    try:
+        limit = int(os.environ.get("XSKILL_VAL_TRAJECTORY_OBS_MAX_CHARS", "12000"))
+    except ValueError:
+        limit = 12000
+    if limit > 0 and len(text) > limit:
+        return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+    return text
 
 
 def _first_present(container: Dict[str, Any], *keys: str) -> Any:

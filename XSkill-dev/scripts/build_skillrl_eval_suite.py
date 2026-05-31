@@ -155,6 +155,7 @@ def _build_case_command(
 ) -> list[str]:
     default_local_dir = f"checkpoints/xskill_eval/{run_name}"
     validation_data_dir = f"${{SKILLRL_REPO_ROOT}}/checkpoints/xskill_eval/{run_name}/validation_dump"
+    validation_trajectory_dir = f"${{SKILLRL_REPO_ROOT}}/checkpoints/xskill_eval/{run_name}/validation_trajectories"
     rollout_data_dir = f"${{SKILLRL_REPO_ROOT}}/checkpoints/xskill_eval/{run_name}/rollout_dump"
 
     cmd = [
@@ -216,6 +217,8 @@ def _build_case_command(
         "disable",
         "--validation-data-dir",
         validation_data_dir,
+        "--validation-trajectory-dir",
+        validation_trajectory_dir,
         "--rollout-data-dir",
         rollout_data_dir,
         "--log-val-generations",
@@ -381,6 +384,7 @@ def _build_suite(args: argparse.Namespace) -> dict[str, Any]:
                     "script_path": _portable_arg(script_path),
                     "default_local_dir": f"SkillRL/checkpoints/xskill_eval/{run_name}",
                     "validation_data_dir": f"SkillRL/checkpoints/xskill_eval/{run_name}/validation_dump",
+                    "validation_trajectory_dir": f"SkillRL/checkpoints/xskill_eval/{run_name}/validation_trajectories",
                     "rollout_data_dir": f"SkillRL/checkpoints/xskill_eval/{run_name}/rollout_dump",
                     "command": command,
                 }
@@ -475,9 +479,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--visit-timeout", type=int, default=15)
     parser.add_argument("--visit-fetch-timeout", type=int, default=20)
     parser.add_argument("--visit-hard-timeout", type=int, default=30)
-    parser.add_argument("--compute-conda-init", default="/data/apps/miniforge3/25.11.0-1/etc/profile.d/conda.sh")
-    parser.add_argument("--compute-conda-env", default="/data/home/scwb693/.conda/envs/skillrl")
-    parser.add_argument("--compute-monorepo-root", default="/data/home/scwb693/run/luzy/XSKILLRL")
+    parser.add_argument("--compute-conda-init", default="")
+    parser.add_argument("--compute-conda-env", default="skillrl")
+    parser.add_argument("--compute-monorepo-root", default="")
 
     parser.add_argument("--dry-run", action="store_true", help="Print commands and manifest without writing output files.")
     args = parser.parse_args()

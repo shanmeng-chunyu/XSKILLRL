@@ -526,7 +526,7 @@ class TrajectoryCollector:
                     episode_lengths=episode_lengths,
                     )
         
-        return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
+        return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, total_infos
     
     def dynamic_multi_turn_loop(
             self,
@@ -566,7 +566,7 @@ class TrajectoryCollector:
                 print(f"valid num={len(total_batch_list)} < target num={self.config.data.train_batch_size * self.config.env.rollout.n}. Keep generating... ({try_count}/{max_try_count})")
             try_count += 1
 
-            batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings = self.vanilla_multi_turn_loop(
+            batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, _total_infos = self.vanilla_multi_turn_loop(
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
                 envs=envs,
@@ -594,7 +594,19 @@ class TrajectoryCollector:
         total_traj_uid = np.concatenate(total_traj_uid, axis=0)
         total_tool_callings = np.concatenate(total_tool_callings, axis=0)
 
-        return total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings
+        return total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings, None
+
+    def _should_collect_validation_trajectories(self, is_train: bool) -> bool:
+        if is_train:
+            return False
+        trainer_cfg = getattr(self.config, "trainer", {})
+        try:
+            val_only = bool(trainer_cfg.get("val_only", False))
+            trajectory_dir = trainer_cfg.get("validation_trajectory_dir", None)
+        except AttributeError:
+            val_only = bool(getattr(trainer_cfg, "val_only", False))
+            trajectory_dir = getattr(trainer_cfg, "validation_trajectory_dir", None)
+        return val_only and bool(trajectory_dir)
 
     def multi_turn_loop(
             self,
@@ -621,7 +633,7 @@ class TrajectoryCollector:
         # Initial observations from the environment
         if self.config.algorithm.filter_groups.enable and is_train:
             # Dynamic Sampling (for DAPO and Dynamic GiGPO)
-            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
+            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings, total_infos = \
                 self.dynamic_multi_turn_loop(
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
@@ -629,7 +641,7 @@ class TrajectoryCollector:
             )
         else:
             # Vanilla Sampling   
-            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
+            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings, total_infos = \
                 self.vanilla_multi_turn_loop(
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
@@ -650,5 +662,16 @@ class TrajectoryCollector:
             traj_uid=total_traj_uid,
             tool_callings=totoal_tool_callings,
         )
+        if self._should_collect_validation_trajectories(is_train) and total_infos is not None:
+            gen_batch_output.meta_info["validation_trajectory_infos"] = total_infos
+            gen_batch_output.meta_info["validation_trajectory_summary"] = [
+                {
+                    "traj_uid": str(total_traj_uid[i]),
+                    "episode_reward": float(total_episode_rewards[i]),
+                    "episode_length": float(total_episode_lengths[i]),
+                    "tool_calling": float(totoal_tool_callings[i]),
+                }
+                for i in range(len(total_batch_list))
+            ]
         
         return gen_batch_output

@@ -6,8 +6,8 @@
 
 | 类型 | 典型路径 | 是否需要重新准备 |
 | --- | --- | --- |
-| Qwen3-VL 模型权重 | `/sata/.../models/Qwen3-VL-8B-Instruct` | 是 |
-| embedding 模型权重 | `/sata/.../models/bge-m3` 或 HF cache | 使用本地经验检索时需要 |
+| Qwen3-VL 模型权重 | `../models/Qwen3-VL-8B-Instruct` 或任意本地路径 | 是 |
+| embedding 模型权重 | `models/bge-m3`、`../models/bge-m3` 或 HF cache | 使用本地经验检索时需要 |
 | benchmark 原始/切分数据 | `XSkill-dev/benchmark/` | 是 |
 | 远程图片本地缓存 | `XSkill-dev/benchmark/_remote_images/` | 推荐准备 |
 | accumulation 记忆库 | `XSkill-dev/memory_bank/test/` | 使用 SkillBank 时需要 |
