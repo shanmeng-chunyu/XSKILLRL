@@ -7,6 +7,7 @@ workflow.
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import requests
 from tools.base import BaseTool
 from tools.tool_registry import register_tool
@@ -54,7 +55,9 @@ class Visit(BaseTool):
         # Configuration
         self.max_content_length = config.get('max_content_length', 5000) if config else 5000
         self.use_llm_summary = config.get('use_llm_summary', True) if config else True  # Default enabled
-        self.timeout = config.get('timeout', 15) if config else 15
+        self.timeout = self._int_config(config, "timeout", "VISIT_TIMEOUT", 15)
+        self.hard_timeout = self._int_config(config, "hard_timeout", "VISIT_HARD_TIMEOUT", 30)
+        self.fetch_timeout = self._int_config(config, "fetch_timeout", "VISIT_FETCH_TIMEOUT", 20)
         
         # API configuration
         self.api_key = config.get('api_key') if config else None
@@ -98,7 +101,12 @@ class Visit(BaseTool):
             print(f"[Visit] Fetching URL: {url}")
             print(f"[Visit] Goal: {goal}")
             
-            content = self._readpage_local(url)
+            content = self._run_with_timeout(
+                self._readpage_local,
+                self.hard_timeout,
+                url,
+                stage=f"visit {url}",
+            )
             
             # All methods failed
             if not content:
@@ -122,6 +130,10 @@ class Visit(BaseTool):
             # Otherwise return extracted content
             return f"Content from {url}:\n\nGoal: {goal}\n\n{content}"
         
+        except FuturesTimeoutError as e:
+            error_msg = f"Error visiting {url}: timed out after {self.hard_timeout}s ({e})"
+            print(f"[Visit] {error_msg}")
+            return error_msg
         except Exception as e:
             error_msg = f"Error visiting {url}: {str(e)}"
             print(f"[Visit] {error_msg}")
@@ -145,11 +157,27 @@ class Visit(BaseTool):
             response = requests.get(url, headers=headers, timeout=self.timeout)
             response.raise_for_status()
             downloaded = response.text
-        except Exception as e:
+        except requests.exceptions.HTTPError as e:
+            response = getattr(e, "response", None)
+            status_code = getattr(response, "status_code", None)
+            reason = getattr(response, "reason", "") or ""
+            if status_code is not None:
+                print(f"[Visit] Requests returned HTTP {status_code} for {url}; not using fallback")
+                raise RuntimeError(f"HTTP {status_code} {reason} for {url}".strip()) from e
+            print(f"[Visit] Requests HTTP error without status for {url}: {e}")
+            raise
+        except requests.exceptions.RequestException as e:
             print(f"[Visit] Requests failed: {e}, trying trafilatura.fetch_url as fallback")
             if trafilatura is not None:
                 try:
-                    downloaded = trafilatura.fetch_url(url)
+                    downloaded = self._run_with_timeout(
+                        trafilatura.fetch_url,
+                        self.fetch_timeout,
+                        url,
+                        stage=f"trafilatura.fetch_url {url}",
+                    )
+                except FuturesTimeoutError as e2:
+                    print(f"[Visit] Trafilatura.fetch_url timed out: {e2}")
                 except Exception as e2:
                     print(f"[Visit] Trafilatura.fetch_url also failed: {e2}")
 
@@ -181,6 +209,35 @@ class Visit(BaseTool):
             return downloaded
 
         return None
+
+    def _run_with_timeout(self, fn, timeout_seconds: int, *args, stage: str = "operation", **kwargs):
+        """Run a potentially blocking function and return without waiting past timeout."""
+
+        if timeout_seconds is None or timeout_seconds <= 0:
+            return fn(*args, **kwargs)
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(fn, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except FuturesTimeoutError as exc:
+            future.cancel()
+            raise FuturesTimeoutError(f"{stage} exceeded {timeout_seconds}s") from exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _int_config(self, config, key: str, env_key: str, default: int) -> int:
+        value = None
+        if config:
+            value = config.get(key)
+        if value is None:
+            value = os.environ.get(env_key)
+        if value is None:
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            print(f"[Visit] Invalid {env_key}={value!r}, using default {default}")
+            return default
     
     def _summarize_with_api(self, content, goal, url):
         """

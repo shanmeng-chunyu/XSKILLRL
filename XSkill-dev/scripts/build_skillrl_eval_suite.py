@@ -62,7 +62,11 @@ def _bash_export_block(args: argparse.Namespace) -> str:
         'export VISIT_BACKEND="${VISIT_BACKEND:-local}"',
         f': "${{BOCHA_SEARCH_TIMEOUT:={args.bocha_search_timeout}}}"',
         f': "${{BOCHA_SEARCH_MAX_RETRIES:={args.bocha_search_max_retries}}}"',
+        f': "${{VISIT_TIMEOUT:={args.visit_timeout}}}"',
+        f': "${{VISIT_FETCH_TIMEOUT:={args.visit_fetch_timeout}}}"',
+        f': "${{VISIT_HARD_TIMEOUT:={args.visit_hard_timeout}}}"',
         'export BOCHA_SEARCH_TIMEOUT BOCHA_SEARCH_MAX_RETRIES',
+        'export VISIT_TIMEOUT VISIT_FETCH_TIMEOUT VISIT_HARD_TIMEOUT',
         f'export XSKILL_EVAL_REQUIRED_TOOLS="{required_tools}"',
     ]
     if bocha_required:
@@ -312,6 +316,9 @@ def _build_suite(args: argparse.Namespace) -> dict[str, Any]:
             "preserve_proxy_env": args.preserve_proxy_env,
             "bocha_search_timeout": args.bocha_search_timeout,
             "bocha_search_max_retries": args.bocha_search_max_retries,
+            "visit_timeout": args.visit_timeout,
+            "visit_fetch_timeout": args.visit_fetch_timeout,
+            "visit_hard_timeout": args.visit_hard_timeout,
             "n_gpus_per_node": args.n_gpus_per_node,
             "val_batch_size": args.val_batch_size,
             "group_size": args.group_size,
@@ -423,7 +430,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--val-do-sample", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--val-temperature", type=float, default=0.4)
-    parser.add_argument("--max-steps", type=int, default=20)
+    parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument("--max-prompt-length", type=int, default=16000)
     parser.add_argument("--max-response-length", type=int, default=2048)
     parser.add_argument("--rollout-max-model-len", type=int, default=24576)
@@ -465,6 +472,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--bocha-search-timeout", type=int, default=60)
     parser.add_argument("--bocha-search-max-retries", type=int, default=3)
+    parser.add_argument("--visit-timeout", type=int, default=15)
+    parser.add_argument("--visit-fetch-timeout", type=int, default=20)
+    parser.add_argument("--visit-hard-timeout", type=int, default=30)
     parser.add_argument("--compute-conda-init", default="/data/apps/miniforge3/25.11.0-1/etc/profile.d/conda.sh")
     parser.add_argument("--compute-conda-env", default="/data/home/scwb693/.conda/envs/skillrl")
     parser.add_argument("--compute-monorepo-root", default="/data/home/scwb693/run/luzy/XSKILLRL")
