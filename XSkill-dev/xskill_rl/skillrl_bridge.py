@@ -360,9 +360,9 @@ class XSkillVisualQAEnvironment:
             return {"type": "answer", "answer": answer_match.group(1).strip()}
 
         for pattern in [
-            r"<tool_call>(.*?)</tool_call>",
-            r"<tool>(.*?)</tool>",
-            r"<function_calls>(.*?)</function_calls>",
+            r"<tool_call\b[^>]*>(.*?)</tool_call>",
+            r"<tool\b[^>]*>(.*?)</tool>",
+            r"<function_calls\b[^>]*>(.*?)</function_calls>",
             r"```(?:json)?\s*(\{.*?\"(?:name|tool_name)\".*?\})\s*```",
         ]:
             match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
@@ -370,6 +370,10 @@ class XSkillVisualQAEnvironment:
                 parsed = self._parse_tool_payload(match.group(1))
                 if parsed:
                     return parsed
+
+        parsed = self._parse_qwen_xml_tool_payload(text)
+        if parsed:
+            return parsed
 
         action_match = re.search(r"Action\s*:\s*([a-zA-Z_][\w]*)\s*(?:\((.*?)\)|\{(.*?)\})", text, flags=re.DOTALL)
         if action_match:
@@ -412,7 +416,7 @@ class XSkillVisualQAEnvironment:
         if not text:
             return None
 
-        tool_match = re.search(r"<tool_call>(.*?)</tool_call>", text, flags=re.IGNORECASE | re.DOTALL)
+        tool_match = re.search(r"<tool_call\b[^>]*>(.*?)</tool_call>", text, flags=re.IGNORECASE | re.DOTALL)
         if tool_match:
             text = tool_match.group(1).strip()
 
